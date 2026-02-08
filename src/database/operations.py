@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session as SQLSession, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from src.utils.timezone import now_ist
+from src.utils.encryption import encrypt_token, decrypt_token
 
 from src.database.models import (
     Base,
@@ -156,6 +157,28 @@ class DatabaseOperations:
         finally:
             session.close()
 
+    def verify_user(self, user_id: int) -> bool:
+        """
+        Mark a user as verified (passed access-code check).
+
+        Args:
+            user_id: User ID.
+
+        Returns:
+            True if user was found and updated, False otherwise.
+        """
+        session = self.get_session()
+        try:
+            stmt = select(User).where(User.id == user_id)
+            user = session.execute(stmt).scalar_one_or_none()
+            if user:
+                user.is_verified = True
+                session.commit()
+                return True
+            return False
+        finally:
+            session.close()
+
     def get_user_by_id(self, user_id: int) -> Optional[User]:
         """
         Get user by ID.
@@ -262,7 +285,7 @@ class DatabaseOperations:
             store = ShopifyStore(
                 user_id=user_id,
                 shop_domain=shop_domain,
-                access_token=access_token,
+                access_token=encrypt_token(access_token),
             )
             session.add(store)
             session.commit()
@@ -274,6 +297,7 @@ class DatabaseOperations:
     def get_store_by_user(self, user_id: int) -> Optional[ShopifyStore]:
         """
         Get Shopify store for a user (assumes one store per user).
+        Automatically decrypts the access_token.
 
         Args:
             user_id: User ID.
@@ -284,13 +308,50 @@ class DatabaseOperations:
         session = self.get_session()
         try:
             stmt = select(ShopifyStore).where(ShopifyStore.user_id == user_id)
-            return session.execute(stmt).scalar_one_or_none()
+            store = session.execute(stmt).scalar_one_or_none()
+            if store:
+                store.access_token = decrypt_token(store.access_token)
+            return store
+        finally:
+            session.close()
+
+    def update_store_credentials(
+        self,
+        store_id: int,
+        shop_domain: str,
+        access_token: str,
+    ) -> Optional[ShopifyStore]:
+        """
+        Update an existing store's domain and access token.
+
+        Args:
+            store_id: Store ID to update.
+            shop_domain: New shop domain.
+            access_token: New access token (will be encrypted).
+
+        Returns:
+            Updated ShopifyStore object or None if not found.
+        """
+        session = self.get_session()
+        try:
+            stmt = select(ShopifyStore).where(ShopifyStore.id == store_id)
+            store = session.execute(stmt).scalar_one_or_none()
+
+            if store:
+                store.shop_domain = shop_domain
+                store.access_token = encrypt_token(access_token)
+                store.installed_at = now_ist()
+                session.commit()
+                session.refresh(store)
+
+            return store
         finally:
             session.close()
 
     def get_all_stores_by_user(self, user_id: int) -> List[ShopifyStore]:
         """
         Get all Shopify stores for a user.
+        Automatically decrypts access_tokens.
 
         Args:
             user_id: User ID.
@@ -301,13 +362,17 @@ class DatabaseOperations:
         session = self.get_session()
         try:
             stmt = select(ShopifyStore).where(ShopifyStore.user_id == user_id)
-            return session.execute(stmt).scalars().all()
+            stores = session.execute(stmt).scalars().all()
+            for store in stores:
+                store.access_token = decrypt_token(store.access_token)
+            return stores
         finally:
             session.close()
 
     def get_store_by_id(self, store_id: int) -> Optional[ShopifyStore]:
         """
         Get Shopify store by ID.
+        Automatically decrypts the access_token.
 
         Args:
             store_id: Store ID.
@@ -318,7 +383,10 @@ class DatabaseOperations:
         session = self.get_session()
         try:
             stmt = select(ShopifyStore).where(ShopifyStore.id == store_id)
-            return session.execute(stmt).scalar_one_or_none()
+            store = session.execute(stmt).scalar_one_or_none()
+            if store:
+                store.access_token = decrypt_token(store.access_token)
+            return store
         finally:
             session.close()
 
@@ -2120,6 +2188,127 @@ class DatabaseOperations:
                 session.refresh(ch_session)
 
             return ch_session
+        finally:
+            session.close()
+
+    # ==================== Store Management Operations ====================
+
+    def reset_store_learning_data(self, user_id: int) -> Dict[str, int]:
+        """
+        Clear all learning data for a user when switching stores.
+
+        Preserves User record and ShopifyStore record — only wipes
+        store-specific learning data.
+
+        Args:
+            user_id: User ID whose learning data to reset.
+
+        Returns:
+            Dictionary with counts of deleted items per table.
+        """
+        session = self.get_session()
+        try:
+            counts = {}
+
+            # Delete response feedback first (FK → conversations)
+            feedback = session.execute(
+                select(ResponseFeedback).where(ResponseFeedback.user_id == user_id)
+            ).scalars().all()
+            counts["response_feedback"] = len(feedback)
+            for fb in feedback:
+                session.delete(fb)
+
+            # Delete conversations
+            conversations = session.execute(
+                select(Conversation).where(Conversation.user_id == user_id)
+            ).scalars().all()
+            counts["conversations"] = len(conversations)
+            for conv in conversations:
+                session.delete(conv)
+
+            # Delete sessions
+            sessions_list = session.execute(
+                select(Session).where(Session.user_id == user_id)
+            ).scalars().all()
+            counts["sessions"] = len(sessions_list)
+            for sess in sessions_list:
+                session.delete(sess)
+
+            # Delete query patterns
+            patterns = session.execute(
+                select(QueryPattern).where(QueryPattern.user_id == user_id)
+            ).scalars().all()
+            counts["patterns"] = len(patterns)
+            for pattern in patterns:
+                session.delete(pattern)
+
+            # Delete preferences
+            preferences = session.execute(
+                select(UserPreference).where(UserPreference.user_id == user_id)
+            ).scalars().all()
+            counts["preferences"] = len(preferences)
+            for pref in preferences:
+                session.delete(pref)
+
+            # Delete tool usage
+            tool_usage = session.execute(
+                select(ToolUsage).where(ToolUsage.user_id == user_id)
+            ).scalars().all()
+            counts["tool_usage"] = len(tool_usage)
+            for usage in tool_usage:
+                session.delete(usage)
+
+            # Delete query errors
+            query_errors = session.execute(
+                select(QueryError).where(QueryError.user_id == user_id)
+            ).scalars().all()
+            counts["query_errors"] = len(query_errors)
+            for qe in query_errors:
+                session.delete(qe)
+
+            # Clear analytics cache
+            stores = session.execute(
+                select(ShopifyStore).where(ShopifyStore.user_id == user_id)
+            ).scalars().all()
+            cache_count = 0
+            for store in stores:
+                caches = session.execute(
+                    select(AnalyticsCache).where(AnalyticsCache.store_id == store.id)
+                ).scalars().all()
+                cache_count += len(caches)
+                for cache in caches:
+                    session.delete(cache)
+            counts["analytics_cache"] = cache_count
+
+            # Clear global templates and recovery patterns
+            templates = session.execute(select(QueryTemplate)).scalars().all()
+            counts["query_templates"] = len(templates)
+            for tmpl in templates:
+                session.delete(tmpl)
+
+            recovery_patterns = session.execute(
+                select(ErrorRecoveryPattern)
+            ).scalars().all()
+            counts["error_recovery_patterns"] = len(recovery_patterns)
+            for rp in recovery_patterns:
+                session.delete(rp)
+
+            global_insights = session.execute(
+                select(GlobalInsight)
+            ).scalars().all()
+            counts["global_insights"] = len(global_insights)
+            for gi in global_insights:
+                session.delete(gi)
+
+            # Reset user interaction count
+            user = session.execute(
+                select(User).where(User.id == user_id)
+            ).scalar_one_or_none()
+            if user:
+                user.interaction_count = 0
+
+            session.commit()
+            return counts
         finally:
             session.close()
 

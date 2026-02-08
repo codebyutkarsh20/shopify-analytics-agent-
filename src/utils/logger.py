@@ -2,14 +2,52 @@
 Structured logging utilities using structlog.
 
 This module provides structured logging configuration and a factory function
-for creating loggers across the application.
+for creating loggers across the application. Includes automatic redaction
+of sensitive values (API keys, tokens, passwords).
 """
 
 import logging
+import re
 import sys
 from pathlib import Path
 
 import structlog
+
+
+# Patterns that indicate sensitive values
+_SENSITIVE_PATTERNS = [
+    re.compile(r"shpat_[A-Za-z0-9]+"),       # Shopify access tokens
+    re.compile(r"sk-[A-Za-z0-9]+"),           # OpenAI / Anthropic API keys
+    re.compile(r"xoxb-[A-Za-z0-9\-]+"),       # Slack tokens
+    re.compile(r"gAAAAA[A-Za-z0-9_\-=]+"),    # Fernet encrypted tokens
+]
+
+_SENSITIVE_KEYS = {
+    "access_token", "api_key", "token", "secret", "password",
+    "authorization", "credentials", "encryption_key",
+}
+
+
+def _redact_value(value):
+    """Redact a single value if it matches sensitive patterns."""
+    if not isinstance(value, str):
+        return value
+    for pattern in _SENSITIVE_PATTERNS:
+        value = pattern.sub("[REDACTED]", value)
+    return value
+
+
+def _redact_processor(logger, method_name, event_dict):
+    """Structlog processor that redacts sensitive values from log events."""
+    for key in list(event_dict.keys()):
+        # Redact known sensitive keys entirely
+        if key.lower() in _SENSITIVE_KEYS:
+            event_dict[key] = "[REDACTED]"
+            continue
+        # Redact pattern matches in string values
+        if isinstance(event_dict[key], str):
+            event_dict[key] = _redact_value(event_dict[key])
+    return event_dict
 
 
 def setup_logging(level: str = "INFO", log_file: str = None) -> None:
@@ -34,7 +72,7 @@ def setup_logging(level: str = "INFO", log_file: str = None) -> None:
         level=level_upper,
     )
 
-    # Setup structlog
+    # Setup structlog with redaction processor
     structlog.configure(
         processors=[
             structlog.stdlib.filter_by_level,
@@ -45,6 +83,7 @@ def setup_logging(level: str = "INFO", log_file: str = None) -> None:
             structlog.processors.StackInfoRenderer(),
             structlog.processors.format_exc_info,
             structlog.processors.UnicodeDecoder(),
+            _redact_processor,  # Redact sensitive values before rendering
             structlog.processors.JSONRenderer(),
         ],
         context_class=dict,
@@ -64,6 +103,13 @@ def setup_logging(level: str = "INFO", log_file: str = None) -> None:
             datefmt="%Y-%m-%d %H:%M:%S",
         )
         file_handler.setFormatter(formatter)
+
+        # Set restrictive file permissions (owner read/write only)
+        import os
+        try:
+            os.chmod(log_file, 0o600)
+        except OSError:
+            pass  # May fail if file doesn't exist yet; handler will create it
 
         root_logger = logging.getLogger()
         root_logger.addHandler(file_handler)

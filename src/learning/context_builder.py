@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Optional
 
 from src.utils.logger import get_logger
+from src.utils.sanitizer import sanitize_for_prompt, sanitize_error_for_prompt, sanitize_query_for_prompt
 
 logger = get_logger(__name__)
 
@@ -237,12 +238,12 @@ class ContextBuilder:
             for err in recent_errors:
                 error_entry = {
                     "tool_name": err.tool_name,
-                    "query_text": err.query_text[:500],  # Truncate to avoid huge prompts
-                    "error_message": err.error_message[:300],
+                    "query_text": sanitize_query_for_prompt(err.query_text, max_length=200),
+                    "error_message": sanitize_error_for_prompt(err.error_message, max_length=200),
                     "error_type": err.error_type,
                 }
                 if err.lesson:
-                    error_entry["lesson"] = err.lesson
+                    error_entry["lesson"] = sanitize_for_prompt(err.lesson, max_length=200)
                 if err.resolved:
                     error_entry["resolved"] = True
                 errors.append(error_entry)
@@ -299,7 +300,7 @@ class ContextBuilder:
         if context.get("recent_queries"):
             for i, query in enumerate(context["recent_queries"][:3], 1):
                 if query["summary"]:
-                    lines.append(f"  - {query['summary']}")
+                    lines.append(f"  - {sanitize_for_prompt(query['summary'], max_length=100)}")
         else:
             lines.append("  - No recent activity")
 
@@ -345,7 +346,7 @@ class ContextBuilder:
             lines.append("\nERROR RECOVERY PATTERNS (apply if these errors occur):")
             for rp in context["recovery_patterns"][:3]:
                 lines.append(f"  If {rp.error_type} with {rp.failed_tool_name}:")
-                lines.append(f"    → {rp.recovery_description}")
+                lines.append(f"    → {sanitize_for_prompt(rp.recovery_description, max_length=200)}")
                 lines.append(f"    Success rate: {rp.confidence:.0%}")
 
         # Global Insights section

@@ -7,6 +7,7 @@ from src.database.operations import DatabaseOperations
 from src.learning.context_builder import ContextBuilder
 from src.learning.template_manager import TemplateManager
 from src.learning.recovery_manager import RecoveryManager
+from src.services.chart_generator import ChartGenerator
 from src.services.shopify_graphql import ShopifyGraphQLClient
 from src.utils.logger import get_logger
 
@@ -20,6 +21,7 @@ def create_llm_service(
     graphql_client: Optional[ShopifyGraphQLClient] = None,
     template_manager: Optional[TemplateManager] = None,
     recovery_manager: Optional[RecoveryManager] = None,
+    chart_generator: Optional[ChartGenerator] = None,
 ):
     """Create the appropriate LLM service based on settings.llm_provider.
 
@@ -30,6 +32,7 @@ def create_llm_service(
         graphql_client: Optional Shopify GraphQL client
         template_manager: Optional template manager
         recovery_manager: Optional recovery manager
+        chart_generator: Optional chart generator for visual analytics
 
     Returns:
         LLMService instance (AnthropicService or OpenAIService)
@@ -46,6 +49,7 @@ def create_llm_service(
             graphql_client=graphql_client,
             template_manager=template_manager,
             recovery_manager=recovery_manager,
+            chart_generator=chart_generator,
         )
     else:
         from src.services.anthropic_service import AnthropicService
@@ -57,4 +61,5 @@ def create_llm_service(
             graphql_client=graphql_client,
             template_manager=template_manager,
             recovery_manager=recovery_manager,
+            chart_generator=chart_generator,
         )

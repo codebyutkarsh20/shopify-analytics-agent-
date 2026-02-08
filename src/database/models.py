@@ -28,6 +28,7 @@ class User(Base):
     telegram_username: Mapped[Optional[str]] = mapped_column(String(255))
     first_name: Mapped[Optional[str]] = mapped_column(String(255))
     display_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    is_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=True)
     interaction_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist, nullable=False)
     last_active: Mapped[datetime] = mapped_column(DateTime, default=now_ist, onupdate=now_ist, nullable=False)

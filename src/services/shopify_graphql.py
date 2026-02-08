@@ -159,11 +159,27 @@ class ShopifyGraphQLClient:
         Raises:
             ValueError: If query contains a mutation
         """
-        # Safety: block mutations — only allow read queries
-        query_stripped = query.strip().lower()
-        if query_stripped.startswith("mutation"):
+        # Safety: block mutations and subscriptions — only allow read queries
+        # Strip comments (both # line comments and inline) before analysis
+        import re as _re
+        lines = query.splitlines()
+        stripped_lines = []
+        for line in lines:
+            # Remove # comments (but not inside strings)
+            line_clean = _re.sub(r'#.*$', '', line).strip()
+            if line_clean:
+                stripped_lines.append(line_clean)
+        query_body = " ".join(stripped_lines).strip().lower()
+
+        # Detect mutation or subscription operations anywhere in the query
+        # Matches: "mutation", "mutation {", "mutation MyMutation", etc.
+        if _re.search(r'\bmutation\b', query_body):
             raise ValueError(
-                "Mutations are blocked for safety. Use MCP tools for create/update operations."
+                "Mutations are blocked for safety. This bot only supports read queries."
+            )
+        if _re.search(r'\bsubscription\b', query_body):
+            raise ValueError(
+                "Subscriptions are blocked for safety. This bot only supports read queries."
             )
 
         logger.info("Executing raw GraphQL query from Claude")

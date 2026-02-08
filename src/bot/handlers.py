@@ -4,6 +4,11 @@ Processes natural language queries and handles bot interactions with users.
 Integrates session management, learning, feedback analysis, and channel adaptation.
 """
 
+import hmac
+import os
+import re
+from typing import List, Tuple, Union
+
 from telegram import Update
 from telegram.constants import ChatAction
 from telegram.ext import ContextTypes
@@ -21,6 +26,7 @@ from src.bot.telegram_adapter import TelegramAdapter
 from src.services.claude_service import ClaudeService
 from src.utils.logger import get_logger
 from src.utils.formatters import format_error_message, markdown_to_telegram_html
+from src.utils.rate_limiter import RateLimiter
 
 logger = get_logger(__name__)
 
@@ -80,6 +86,15 @@ class MessageHandler:
         self._aggregation_interval = getattr(
             settings, "aggregation_interval", 50
         )
+        # Security: rate limiter
+        self._rate_limiter = RateLimiter(
+            max_requests=settings.security.rate_limit_per_minute,
+            window_seconds=60,
+        )
+        # Security: allowed user IDs (empty = allow all)
+        self._allowed_users = settings.telegram.allowed_users
+        # Security: shared access code (empty = no verification required)
+        self._bot_access_code = settings.security.bot_access_code
 
         logger.info("MessageHandler initialized with learning components")
 
@@ -111,6 +126,18 @@ class MessageHandler:
         message_text = update.message.text
         message_length = len(message_text) if message_text else 0
 
+        # Security: user allowlist check
+        if self._allowed_users and telegram_user_id not in self._allowed_users:
+            logger.warning(
+                "Unauthorized access attempt blocked",
+                user_id=telegram_user_id,
+                username=update.effective_user.username,
+            )
+            await update.message.reply_text(
+                "⛔ This bot is private. Contact the administrator for access."
+            )
+            return
+
         logger.info(
             "Message received",
             user_id=telegram_user_id,
@@ -118,7 +145,61 @@ class MessageHandler:
             message_length=message_length,
         )
 
+        # Security: rate limiting
+        allowed, retry_after = self._rate_limiter.is_allowed(telegram_user_id)
+        if not allowed:
+            await update.message.reply_text(
+                f"⏳ Too many requests. Please wait {retry_after}s before trying again."
+            )
+            return
+
         try:
+            # Step 0: Access-code verification gate
+            # If BOT_ACCESS_CODE is configured, new users must provide it once.
+            if self._bot_access_code:
+                user_for_verify = self.db_ops.get_or_create_user(
+                    telegram_user_id=telegram_user_id,
+                    telegram_username=update.effective_user.username,
+                    first_name=update.effective_user.first_name,
+                )
+                if not user_for_verify.is_verified:
+                    # Check if this message IS the access code
+                    code_attempt = (message_text or "").strip()
+                    if hmac.compare_digest(code_attempt, self._bot_access_code):
+                        # Correct code — verify the user
+                        self.db_ops.verify_user(user_for_verify.id)
+                        logger.info(
+                            "User verified via access code",
+                            user_id=user_for_verify.id,
+                            telegram_user_id=telegram_user_id,
+                        )
+                        # Delete the message containing the code for security
+                        try:
+                            await update.message.delete()
+                        except Exception:
+                            pass
+                        await update.message.reply_text(
+                            "✅ <b>Access Granted!</b>\n\n"
+                            "You're now verified. Welcome aboard!\n"
+                            "Type /start to get started or just ask me a question.",
+                            parse_mode="HTML",
+                        )
+                        return
+                    else:
+                        # Wrong code or regular message — prompt for code
+                        logger.warning(
+                            "Unverified user attempted access",
+                            telegram_user_id=telegram_user_id,
+                            username=update.effective_user.username,
+                        )
+                        await update.message.reply_text(
+                            "🔒 <b>Verification Required</b>\n\n"
+                            "Please enter the access code to use this bot.\n\n"
+                            "If you don't have a code, contact the bot administrator.",
+                            parse_mode="HTML",
+                        )
+                        return
+
             # Check if user is in connect flow (handled by BotCommands)
             if self.bot_commands and hasattr(self.bot_commands, 'handle_connect_response'):
                 if await self.bot_commands.handle_connect_response(update, context):
@@ -223,9 +304,10 @@ class MessageHandler:
             )
             self.preference_manager.update_preferences_from_patterns(user.id)
 
-            # Step 8: Format & send response
+            # Step 8: Format & send response (with charts if any)
             logger.debug("Sending response", user_id=user.id)
-            await self._send_message_split(update, response)
+            chart_files = getattr(self.claude_service, "last_chart_files", [])
+            await self._send_message_split(update, response, chart_files=chart_files)
 
             # Step 9: Save conversation (with session_id, channel_type, tool_calls)
             tool_calls_json = self.claude_service.last_tool_calls_json
@@ -352,81 +434,168 @@ class MessageHandler:
                     error=str(e),
                 )
 
-    async def _send_message_split(
-        self,
-        update: Update,
-        message: str
-    ) -> None:
-        """
-        Send a message, splitting into chunks if it exceeds Telegram's limit.
+    # ── Chart marker pattern: [CHART:0], [CHART:1], etc. ──────────
+    _CHART_MARKER_RE = re.compile(r"\[CHART:(\d+)\]")
 
-        Uses the TelegramAdapter for formatting if available.
+    def _build_interleaved_segments(
+        self,
+        message: str,
+        chart_files: List[str],
+    ) -> List[Union[str, Tuple[str, str]]]:
+        """Split a response into interleaved text and chart segments.
+
+        Scans the message for [CHART:N] markers and builds an ordered list
+        of segments, each being either a text string or a ("chart", filepath)
+        tuple.  Any charts that weren't referenced inline are appended at the
+        end so they're never lost.
 
         Args:
-            update: The update object
-            message: The message text to send
+            message: The raw LLM response (may contain [CHART:N] markers)
+            chart_files: Ordered list of chart file paths (index ↔ marker N)
+
+        Returns:
+            List of segments:
+                str          → text segment (send via reply_text)
+                ("chart", p) → chart segment (send via reply_photo)
         """
-        if not message:
-            return
+        if not chart_files:
+            # No charts at all — just return the text
+            return [message] if message.strip() else []
 
-        # Format via adapter (Telegram HTML conversion)
-        formatted = self.telegram_adapter.format_response(message)
-        msg_limit = self.telegram_adapter.get_message_limit()
+        segments: List[Union[str, Tuple[str, str]]] = []
+        used_indices: set = set()
 
-        logger.debug(
-            "Splitting message if needed",
-            message_length=len(formatted),
-            limit=msg_limit,
-        )
+        # Split text on [CHART:N] markers, keeping the N values
+        parts = self._CHART_MARKER_RE.split(message)
 
-        # Split into chunks
-        chunks = []
-        current_chunk = ""
-
-        for paragraph in formatted.split("\n\n"):
-            if len(current_chunk) + len(paragraph) + 2 > msg_limit:
-                if current_chunk:
-                    chunks.append(current_chunk)
-                current_chunk = paragraph
+        # parts alternates: [text, index, text, index, text, ...]
+        for i, part in enumerate(parts):
+            if i % 2 == 0:
+                # Text segment
+                text = part.strip()
+                if text:
+                    segments.append(text)
             else:
-                if current_chunk:
-                    current_chunk += "\n\n"
-                current_chunk += paragraph
+                # Chart index
+                chart_idx = int(part)
+                if chart_idx < len(chart_files):
+                    segments.append(("chart", chart_files[chart_idx]))
+                    used_indices.add(chart_idx)
+                else:
+                    logger.warning(
+                        "Chart index out of range",
+                        chart_index=chart_idx,
+                        available=len(chart_files),
+                    )
 
-        if current_chunk:
-            chunks.append(current_chunk)
+        # Append any charts that weren't referenced inline (safety net)
+        for idx, filepath in enumerate(chart_files):
+            if idx not in used_indices:
+                logger.debug("Appending unreferenced chart", chart_index=idx)
+                segments.append(("chart", filepath))
 
-        logger.debug("Message split into chunks", chunk_count=len(chunks))
+        return segments
 
-        # Send each chunk
+    async def _send_text_chunk(self, update: Update, text: str) -> None:
+        """Send a single text chunk, splitting further if over Telegram limit."""
+        msg_limit = self.telegram_adapter.get_message_limit()
+        formatted = self.telegram_adapter.format_response(text)
+
+        # Split into sub-chunks if needed
+        chunks = []
+        current = ""
+        for paragraph in formatted.split("\n\n"):
+            if len(current) + len(paragraph) + 2 > msg_limit:
+                if current:
+                    chunks.append(current)
+                current = paragraph
+            else:
+                current = f"{current}\n\n{paragraph}" if current else paragraph
+        if current:
+            chunks.append(current)
+
         for idx, chunk in enumerate(chunks):
             try:
-                await update.message.reply_text(
-                    chunk,
-                    parse_mode="HTML"
-                )
+                await update.message.reply_text(chunk, parse_mode="HTML")
                 logger.debug(
-                    "Message chunk sent",
+                    "Text chunk sent",
                     chunk_number=idx + 1,
                     total_chunks=len(chunks),
                     chunk_length=len(chunk),
                 )
             except Exception as e:
-                logger.error(
-                    "Error sending message chunk",
-                    chunk_number=idx + 1,
-                    error=str(e),
-                    exc_info=True,
-                )
-                # Try without HTML parsing if that fails
+                logger.error("Error sending text chunk", error=str(e), exc_info=True)
                 try:
                     await update.message.reply_text(chunk)
-                except Exception as retry_error:
-                    logger.error(
-                        "Failed to send message chunk even without HTML",
-                        chunk_number=idx + 1,
-                        error=str(retry_error),
-                    )
+                except Exception as retry_err:
+                    logger.error("Fallback send also failed", error=str(retry_err))
+
+    async def _send_chart_photo(self, update: Update, filepath: str) -> None:
+        """Send a chart image and clean up the temp file."""
+        try:
+            if os.path.exists(filepath):
+                with open(filepath, "rb") as photo:
+                    await update.message.reply_photo(photo=photo)
+                logger.info("Chart image sent", chart_file=filepath)
+            else:
+                logger.warning("Chart file not found", chart_file=filepath)
+        except Exception as e:
+            logger.error(
+                "Failed to send chart image",
+                chart_file=filepath,
+                error=str(e),
+                exc_info=True,
+            )
+        finally:
+            try:
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+                    logger.debug("Chart file cleaned up", chart_file=filepath)
+            except Exception:
+                pass
+
+    async def _send_message_split(
+        self,
+        update: Update,
+        message: str,
+        chart_files: List[str] = None,
+    ) -> None:
+        """
+        Send a response with dynamically interleaved text and chart images.
+
+        The LLM places [CHART:N] markers in its response to indicate where
+        each chart should appear.  This method splits the message at those
+        markers and sends text chunks and chart photos in the correct order,
+        producing a natural mixed layout in Telegram:
+
+            Text → Image → Text → Image → Text
+
+        If no markers are found, charts are appended after the text.
+
+        Args:
+            update: The Telegram update object
+            message: The LLM's response text (may contain [CHART:N] markers)
+            chart_files: Ordered list of chart image file paths
+        """
+        if not message:
+            return
+
+        segments = self._build_interleaved_segments(
+            message, chart_files or []
+        )
+
+        logger.debug(
+            "Sending interleaved response",
+            segment_count=len(segments),
+            text_segments=sum(1 for s in segments if isinstance(s, str)),
+            chart_segments=sum(1 for s in segments if isinstance(s, tuple)),
+        )
+
+        for segment in segments:
+            if isinstance(segment, tuple) and segment[0] == "chart":
+                await self._send_chart_photo(update, segment[1])
+            elif isinstance(segment, str):
+                await self._send_text_chunk(update, segment)
 
     async def _handle_error(
         self,

@@ -358,16 +358,21 @@ def format_product_performance(
 
 
 def format_error_message(error: Any) -> str:
-    """Format an error message in a user-friendly way (HTML)."""
-    if isinstance(error, Exception):
-        error_msg = escape(str(error))
-    else:
-        error_msg = escape(str(error))
+    """Format an error message in a user-friendly way (HTML).
+
+    Hides internal details (GraphQL errors, stack traces, API schema)
+    and shows a generic message. Full error details stay in server logs only.
+    """
+    # Generate a short error ID for log correlation
+    import hashlib
+    import time
+    error_id = hashlib.md5(f"{time.time()}{str(error)}".encode()).hexdigest()[:8]
 
     return (
         "⚠️ <b>Something went wrong</b>\n\n"
-        f"<code>{error_msg[:300]}</code>\n\n"
-        "Please try rephrasing your question or use /help to see examples."
+        f"Your request couldn't be completed. Please try rephrasing\n"
+        f"your question or use /help to see examples.\n\n"
+        f"<i>Error ref: {error_id}</i>"
     )
 
 

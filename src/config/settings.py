@@ -16,9 +16,19 @@ load_dotenv(PROJECT_ROOT / ".env")
 @dataclass
 class TelegramConfig:
     bot_token: str = ""
+    allowed_users: list = field(default_factory=list)
 
     def __post_init__(self):
         self.bot_token = os.getenv("TELEGRAM_BOT_TOKEN", self.bot_token)
+        # Comma-separated Telegram user IDs.  Empty = allow all (dev mode).
+        allowed_raw = os.getenv("ALLOWED_TELEGRAM_USERS", "")
+        if allowed_raw.strip():
+            self.allowed_users = [
+                int(uid.strip()) for uid in allowed_raw.split(",")
+                if uid.strip().isdigit()
+            ]
+        else:
+            self.allowed_users = []
 
 
 @dataclass
@@ -87,6 +97,23 @@ class LoggingConfig:
 
 
 @dataclass
+class SecurityConfig:
+    """Security-related settings."""
+    encryption_key: str = ""
+    rate_limit_per_minute: int = 10
+    bot_access_code: str = ""
+
+    def __post_init__(self):
+        self.encryption_key = os.getenv("ENCRYPTION_KEY", "")
+        rate_str = os.getenv("RATE_LIMIT_PER_MINUTE", "10")
+        if rate_str.isdigit():
+            self.rate_limit_per_minute = int(rate_str)
+        # Shared passphrase users must provide once to unlock the bot.
+        # Leave empty to allow everyone without verification.
+        self.bot_access_code = os.getenv("BOT_ACCESS_CODE", "")
+
+
+@dataclass
 class Settings:
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     anthropic: AnthropicConfig = field(default_factory=AnthropicConfig)
@@ -95,6 +122,7 @@ class Settings:
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     mcp: MCPConfig = field(default_factory=MCPConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    security: SecurityConfig = field(default_factory=SecurityConfig)
     llm_provider: str = ""
 
     # Timezone
@@ -136,6 +164,11 @@ class Settings:
             missing.append("SHOPIFY_ACCESS_TOKEN")
         if not self.shopify.shop_domain:
             missing.append("SHOPIFY_SHOP_DOMAIN")
+
+        # Warn (not block) about missing encryption key
+        if not self.security.encryption_key:
+            missing.append("ENCRYPTION_KEY (recommended for token security)")
+
         return missing
 
 

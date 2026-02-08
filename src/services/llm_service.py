@@ -17,6 +17,7 @@ from src.database.operations import DatabaseOperations
 from src.learning.context_builder import ContextBuilder
 from src.learning.template_manager import TemplateManager
 from src.learning.recovery_manager import RecoveryManager
+from src.services.chart_generator import ChartGenerator
 from src.services.shopify_graphql import ShopifyGraphQLClient
 from src.utils.logger import get_logger
 from src.utils.timezone import now_ist
@@ -51,6 +52,7 @@ class LLMService(ABC):
         graphql_client: Optional[ShopifyGraphQLClient] = None,
         template_manager: Optional[TemplateManager] = None,
         recovery_manager: Optional[RecoveryManager] = None,
+        chart_generator: Optional[ChartGenerator] = None,
     ):
         self.settings = settings
         self.db_ops = db_ops
@@ -58,9 +60,12 @@ class LLMService(ABC):
         self.graphql_client = graphql_client
         self.template_manager = template_manager
         self.recovery_manager = recovery_manager
+        self.chart_generator = chart_generator
 
         # Track tool calls per message for learning
         self.last_tool_calls: List[Dict] = []
+        # Track chart image files generated during message processing
+        self.last_chart_files: List[str] = []
 
         # Initialize provider-specific client
         self.client = self._create_api_client()
@@ -198,8 +203,9 @@ class LLMService(ABC):
                 provider=self.provider_name,
             )
 
-            # Reset tool call tracking
+            # Reset tool call and chart tracking
             self.last_tool_calls = []
+            self.last_chart_files = []
             session_key = f"{user_id}_{session_id or 'nosession'}"
 
             # Build conversation history and system prompt
@@ -387,6 +393,8 @@ class LLMService(ABC):
         if self.graphql_client:
             tools.append(self._get_analytics_tool_definition())
             tools.append(self._get_raw_graphql_tool_definition())
+        if self.chart_generator:
+            tools.append(self._get_chart_tool_definition())
         return tools
 
     def _get_analytics_tool_definition(self) -> Dict[str, Any]:
@@ -477,26 +485,77 @@ class LLMService(ABC):
             },
         }
 
+    def _get_chart_tool_definition(self) -> Dict[str, Any]:
+        """Return the generate_chart tool definition."""
+        return {
+            "name": "generate_chart",
+            "description": (
+                "Generate a chart image that appears INLINE in your Telegram response. "
+                "After calling this tool, you MUST write [CHART:N] (where N is the chart_index from the result) "
+                "on its own line in your response, at the exact position you want the image to appear. "
+                "Write intro/context text ABOVE the marker, and analysis/insight text BELOW it. "
+                "Chart types: 'bar' for comparisons, 'line' for time trends, "
+                "'pie' for distribution, 'horizontal_bar' for ranked lists."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "chart_type": {
+                        "type": "string",
+                        "enum": ["bar", "line", "pie", "horizontal_bar"],
+                        "description": (
+                            "Type of chart. Use 'bar' for comparisons, 'line' for time trends, "
+                            "'pie' for proportions, 'horizontal_bar' for ranked lists."
+                        ),
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Chart title (e.g., 'Top 5 Products by Revenue', 'Order Trend — Last 7 Days')",
+                    },
+                    "labels": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Category labels or time points (e.g., product names, dates)",
+                    },
+                    "values": {
+                        "type": "array",
+                        "items": {"type": "number"},
+                        "description": "Numeric values corresponding to each label (e.g., revenue, count)",
+                    },
+                    "y_axis_label": {
+                        "type": "string",
+                        "description": "Optional axis label (e.g., 'Revenue (₹)', 'Orders')",
+                    },
+                },
+                "required": ["chart_type", "title", "labels", "values"],
+            },
+        }
+
     async def _execute_tool(self, tool_name: str, tool_input: Dict[str, Any]) -> str:
-        """Execute a tool call via direct Shopify GraphQL API."""
+        """Execute a tool call via direct Shopify GraphQL API or chart generation."""
         start_time = time.time()
 
         try:
-            if not self.graphql_client:
+            # Chart generation doesn't require GraphQL client
+            if tool_name == "generate_chart":
+                if not self.chart_generator:
+                    raise ValueError("Chart generator not initialized")
+                result_json = await self._execute_chart_tool(tool_input)
+            elif not self.graphql_client:
                 raise ValueError("GraphQL client not initialized — check Shopify credentials")
-
-            logger.info(
-                "Executing tool via GraphQL",
-                tool_name=tool_name,
-                tool_input=tool_input,
-            )
-
-            if tool_name == "shopify_analytics":
-                result_json = await self._execute_analytics_tool(tool_input)
-            elif tool_name == "shopify_graphql":
-                result_json = await self._execute_raw_graphql(tool_input)
             else:
-                raise ValueError(f"Unknown tool: {tool_name}")
+                logger.info(
+                    "Executing tool via GraphQL",
+                    tool_name=tool_name,
+                    tool_input=tool_input,
+                )
+
+                if tool_name == "shopify_analytics":
+                    result_json = await self._execute_analytics_tool(tool_input)
+                elif tool_name == "shopify_graphql":
+                    result_json = await self._execute_raw_graphql(tool_input)
+                else:
+                    raise ValueError(f"Unknown tool: {tool_name}")
 
             execution_time_ms = int((time.time() - start_time) * 1000)
             logger.info(
@@ -589,6 +648,81 @@ class LLMService(ABC):
         result = await self.graphql_client.execute_raw_query(query, variables)
         return json.dumps(result)
 
+    async def _execute_chart_tool(self, tool_input: Dict[str, Any]) -> str:
+        """Execute the generate_chart tool — create a chart image.
+
+        The generated chart file path is stored in self.last_chart_files
+        so the message handler can send it as a Telegram photo.
+
+        Returns:
+            JSON string with chart metadata for the LLM
+        """
+        chart_type = tool_input.get("chart_type", "bar")
+        title = tool_input.get("title", "Chart")
+        labels = tool_input.get("labels", [])
+        values = tool_input.get("values", [])
+        y_axis_label = tool_input.get("y_axis_label")
+
+        if not labels or not values:
+            raise ValueError("Both 'labels' and 'values' are required and must not be empty")
+        if len(labels) != len(values):
+            raise ValueError(
+                f"labels ({len(labels)}) and values ({len(values)}) must have the same length"
+            )
+
+        logger.info(
+            "Generating chart",
+            chart_type=chart_type,
+            title=title,
+            data_points=len(labels),
+        )
+
+        # Route to appropriate chart generator method
+        if chart_type == "line":
+            filepath = self.chart_generator.generate_line_chart(
+                labels, values, title, y_axis_label
+            )
+        elif chart_type == "bar":
+            filepath = self.chart_generator.generate_bar_chart(
+                labels, values, title, y_axis_label
+            )
+        elif chart_type == "pie":
+            filepath = self.chart_generator.generate_pie_chart(
+                labels, values, title
+            )
+        elif chart_type == "horizontal_bar":
+            filepath = self.chart_generator.generate_horizontal_bar_chart(
+                labels, values, title, y_axis_label
+            )
+        else:
+            raise ValueError(f"Unknown chart type: {chart_type}")
+
+        if not filepath:
+            raise ValueError("Chart generation failed — check logs for details")
+
+        # Store file path; the index is used by the LLM for inline placement
+        chart_index = len(self.last_chart_files)
+        self.last_chart_files.append(filepath)
+
+        logger.info(
+            "Chart generated successfully",
+            filepath=filepath, chart_type=chart_type, chart_index=chart_index,
+        )
+
+        return json.dumps({
+            "status": "success",
+            "chart_type": chart_type,
+            "title": title,
+            "chart_index": chart_index,
+            "IMPORTANT": (
+                f"You MUST write [CHART:{chart_index}] on its own line in your "
+                f"final response, exactly where you want this chart image to appear. "
+                f"Write intro text ABOVE the marker and analysis/insight BELOW it. "
+                f"Do NOT say 'charts sent above' or 'see charts below' — the image "
+                f"appears inline wherever you place [CHART:{chart_index}]."
+            ),
+        })
+
     def _build_system_prompt(self, user_id: int) -> str:
         """Build the system prompt with context, tool guidance, and formatting rules."""
         try:
@@ -677,6 +811,61 @@ class LLMService(ABC):
                     "- Use shopify_graphql for: shop info, inventory, collections, discounts, metafields, complex nested queries, anything else",
                 ])
 
+            if self.chart_generator:
+                system_parts.extend([
+                    "",
+                    "3. generate_chart — Create chart images that appear INLINE in your response",
+                    "   - Query data first, then call generate_chart with extracted labels and values",
+                    "   - Chart types: 'bar' (comparisons), 'line' (trends), 'pie' (distribution), 'horizontal_bar' (ranked lists)",
+                    "",
+                    "CHART INLINE PLACEMENT — MANDATORY RULES:",
+                    "",
+                    "After calling generate_chart, the result gives you a chart_index (0, 1, 2, ...).",
+                    "You MUST write [CHART:N] on its own line in your final response to place the image.",
+                    "The system splits your text at those markers and sends text + images interleaved.",
+                    "",
+                    "RULES (follow strictly):",
+                    "1. Every generated chart MUST have a [CHART:N] marker in your response — no exceptions.",
+                    "2. Place each [CHART:N] on its OWN line, between text paragraphs.",
+                    "3. Write context/intro text ABOVE each [CHART:N], then insight/analysis BELOW it.",
+                    "4. NEVER say 'charts sent above', 'see the charts below', or 'charts attached'.",
+                    "   The image appears right where you put [CHART:N] — refer to it as 'the chart above' AFTER the marker.",
+                    "5. For multi-chart responses, INTERLEAVE charts with text — don't group all charts together.",
+                    "6. Keep each text section between charts SHORT (2-5 lines max). Let the chart speak.",
+                    "",
+                    "GOOD example (text-chart-text-chart-text):",
+                    "",
+                    "  **📊 Store Revenue Analysis**",
+                    "",
+                    "  Here are your top 5 products by revenue:",
+                    "",
+                    "  [CHART:0]",
+                    "",
+                    "  **ABC** dominates with ₹5.1L — but note the ₹5.9L refund. **Combat Trimmer** at ₹1.02L is your strongest net performer.",
+                    "",
+                    "  Now let's look at the monthly revenue trend:",
+                    "",
+                    "  [CHART:1]",
+                    "",
+                    "  November 2025 was your peak month at ₹1.26L from 20 orders. February 2026 is off to a strong start.",
+                    "",
+                    "  Here's how your payment statuses break down:",
+                    "",
+                    "  [CHART:2]",
+                    "",
+                    "  ⚠️ 60% orders have pending payments — follow up to convert ₹2L+ in revenue.",
+                    "",
+                    "BAD example (NEVER do this):",
+                    "  [all text in one block, then] 'Charts sent above visualize all this data!'",
+                    "  [or] grouping all [CHART:0] [CHART:1] [CHART:2] together in one spot",
+                    "",
+                    "CHART TYPE SELECTION:",
+                    "- Rankings, top-N, comparisons → 'bar' or 'horizontal_bar'",
+                    "- Revenue/orders over time → 'line'",
+                    "- Status distribution, market share → 'pie'",
+                    "- Keep titles descriptive: 'Top 5 Products by Revenue' not just 'Products'",
+                ])
+
             system_parts.extend([
                 "",
                 "ANALYSIS GUIDELINES:",
@@ -685,6 +874,8 @@ class LLMService(ABC):
                 "- Highlight notable trends, outliers, or changes worth attention",
                 "- End with 1-2 short actionable recommendations when useful",
                 "- Be concise — no filler, every sentence should add value",
+                "- When charts are generated, keep text sections SHORT (2-5 lines) between charts",
+                "- Let charts do the heavy lifting — don't repeat all the data the chart already shows",
                 "",
                 "RESPONSE FORMATTING (CRITICAL — output is rendered in Telegram):",
                 "",
@@ -698,10 +889,9 @@ class LLMService(ABC):
                 "Lists and rankings:",
                 "- Use numbered lists (1. 2. 3.) for rankings and ordered items",
                 "- Use bullet points (- item) for unordered info",
-                "- Add a sub-detail line indented under each item with key metrics",
                 "",
                 "Numbers and formatting:",
-                "- Currency: $1,234.56 (with commas and 2 decimals)",
+                "- Currency: ₹1,234.56 (with commas and 2 decimals)",
                 "- Percentages: 15.5% or +12.3% / -8.1% for changes",
                 "- Large numbers: 1,234 (always use comma separators)",
                 "- Comparisons: show change with arrow: ▲ 12.3% or ▼ 8.1%",
@@ -712,23 +902,7 @@ class LLMService(ABC):
                 "- Markdown tables — convert to numbered or bulleted lists",
                 "- Nested markdown (**bold *italic***) — keep it simple",
                 "- Long walls of text — break into scannable sections",
-                "",
-                "Example of ideal response format:",
-                "",
-                "**📊 Revenue Report — Last 7 Days**",
-                "",
-                "**Overview**",
-                "- Total Revenue: `$12,345.67`",
-                "- Orders: `156` (▲ 12.3% vs prior week)",
-                "- Avg Order Value: `$79.14`",
-                "",
-                "**🏆 Top Products**",
-                "1. **Premium Widget** — `$3,456.00` (42 units)",
-                "2. **Basic Bundle** — `$2,100.50` (87 units)",
-                "3. **Gift Set** — `$1,890.00` (31 units)",
-                "",
-                "**💡 Insight**",
-                "Revenue is up 12% week-over-week driven by the Premium Widget. Consider featuring it on your homepage.",
+                "- NEVER write 'charts sent above/below' or 'see attached charts' — charts are inline",
             ])
 
             return "\n".join(system_parts)

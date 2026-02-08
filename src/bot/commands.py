@@ -1,9 +1,10 @@
 """Bot command handlers for Telegram.
 
-Handles all bot commands like /start, /help, /settings, /connect, /forget, and /status.
+Handles all bot commands like /start, /help, /settings, /connect, /forget, /status, and /verify.
 All messages use HTML parse_mode for robust formatting (no escaping headaches).
 """
 
+import hmac
 import re
 from html import escape
 from typing import Optional
@@ -37,7 +38,38 @@ class BotCommands:
     ):
         self.db_ops = db_ops
         self.preference_manager = preference_manager
+        self._bot_access_code = settings.security.bot_access_code
         logger.info("BotCommands initialized")
+
+    # ── Access-code helpers ─────────────────────────────────────────
+
+    def _is_user_verified(self, telegram_user_id: int) -> bool:
+        """Check whether a user has passed the access-code gate.
+
+        Returns True if no BOT_ACCESS_CODE is configured (open mode)
+        or if the user's is_verified flag is True.
+        """
+        if not self._bot_access_code:
+            return True
+        user = self.db_ops.get_or_create_user(telegram_user_id=telegram_user_id)
+        return bool(user.is_verified)
+
+    async def _require_verification(self, update: Update) -> bool:
+        """Send the verification prompt if user is not yet verified.
+
+        Returns True if access was blocked, False if user is clear.
+        """
+        if self._is_user_verified(update.effective_user.id):
+            return False
+        await update.message.reply_text(
+            "🔒 <b>Verification Required</b>\n\n"
+            "Please enter the access code to use this bot.\n"
+            "You can send it as a message or use:\n"
+            "<code>/verify YOUR_CODE</code>\n\n"
+            "If you don't have a code, contact the bot administrator.",
+            parse_mode=PARSE_MODE,
+        )
+        return True
 
     def _auto_connect_from_env(self, user_id: int) -> bool:
         """
@@ -78,6 +110,10 @@ class BotCommands:
             user_id=update.effective_user.id,
             username=update.effective_user.username,
         )
+
+        # Gate: access-code verification
+        if await self._require_verification(update):
+            return
 
         try:
             user = self.db_ops.get_or_create_user(
@@ -126,6 +162,10 @@ class BotCommands:
         """Handle /help command."""
         logger.info("Help command received", user_id=update.effective_user.id)
 
+        # Gate: access-code verification
+        if await self._require_verification(update):
+            return
+
         try:
             help_msg = format_help_message()
             await update.message.reply_text(help_msg, parse_mode=PARSE_MODE)
@@ -142,9 +182,16 @@ class BotCommands:
         """Handle /connect command."""
         logger.info("Connect command received", user_id=update.effective_user.id)
 
+        # Gate: access-code verification
+        if await self._require_verification(update):
+            return
+
         try:
+            import secrets
+            nonce = secrets.token_hex(16)
             context.user_data["awaiting_credentials"] = True
             context.user_data["connection_step"] = "waiting_for_domain"
+            context.user_data["connect_nonce"] = nonce
 
             instructions = (
                 "<b>🔗 Connect Your Shopify Store</b>\n\n"
@@ -154,7 +201,7 @@ class BotCommands:
                 "For security reasons, send them as a single message in this format:\n"
                 "<code>domain:token</code>\n\n"
                 "<i>Example:</i> <code>myshop.myshopify.com:shpat_abc123xyz</code>\n\n"
-                "⚠️ <b>Important:</b> Your credentials are encrypted and stored securely."
+                "⚠️ <b>Important:</b> I will delete your message containing the token immediately after reading it for security."
             )
 
             await update.message.reply_text(instructions, parse_mode=PARSE_MODE)
@@ -174,6 +221,11 @@ class BotCommands:
         Returns True if message was handled, False otherwise.
         """
         if not context.user_data.get("awaiting_credentials"):
+            return False
+
+        # Verify connect flow nonce for CSRF protection
+        if not context.user_data.get("connect_nonce"):
+            logger.warning("Missing connect nonce", user_id=update.effective_user.id)
             return False
 
         user_id = update.effective_user.id
@@ -197,6 +249,17 @@ class BotCommands:
             parts = message_text.split(":", 1)
             domain = parts[0].strip()
             token = parts[1].strip()
+
+            # Security: delete the message containing the token
+            try:
+                await update.message.delete()
+                logger.info("Credential message deleted for security", user_id=user_id)
+            except Exception as del_err:
+                logger.warning(
+                    "Could not delete credential message — bot may lack delete permission",
+                    user_id=user_id,
+                    error=str(del_err),
+                )
 
             if not domain or not token:
                 await update.message.reply_text(
@@ -269,6 +332,10 @@ class BotCommands:
         """Handle /settings command."""
         logger.info("Settings command received", user_id=update.effective_user.id)
 
+        # Gate: access-code verification
+        if await self._require_verification(update):
+            return
+
         try:
             user = self.db_ops.get_or_create_user(
                 telegram_user_id=update.effective_user.id,
@@ -313,6 +380,10 @@ class BotCommands:
     ) -> None:
         """Handle /forget command."""
         logger.info("Forget command received", user_id=update.effective_user.id)
+
+        # Gate: access-code verification
+        if await self._require_verification(update):
+            return
 
         try:
             confirmation_msg = (
@@ -384,6 +455,10 @@ class BotCommands:
         """Handle /status command."""
         logger.info("Status command received", user_id=update.effective_user.id)
 
+        # Gate: access-code verification
+        if await self._require_verification(update):
+            return
+
         try:
             user = self.db_ops.get_or_create_user(
                 telegram_user_id=update.effective_user.id,
@@ -419,3 +494,81 @@ class BotCommands:
             logger.error("Error in status command", error=str(e), exc_info=True)
             error_msg = format_error_message(e)
             await update.message.reply_text(error_msg, parse_mode=PARSE_MODE)
+
+    # ── /verify command ─────────────────────────────────────────────
+
+    async def verify_command(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """Handle /verify <code> command.
+
+        Allows users to explicitly submit the access code.
+        Usage: /verify MY_SECRET_CODE
+        """
+        telegram_user_id = update.effective_user.id
+        logger.info("Verify command received", user_id=telegram_user_id)
+
+        # If no access code is configured, verification is not needed
+        if not self._bot_access_code:
+            await update.message.reply_text(
+                "ℹ️ No access code is required for this bot.",
+                parse_mode=PARSE_MODE,
+            )
+            return
+
+        # Already verified?
+        user = self.db_ops.get_or_create_user(
+            telegram_user_id=telegram_user_id,
+            telegram_username=update.effective_user.username,
+            first_name=update.effective_user.first_name,
+        )
+        if user.is_verified:
+            await update.message.reply_text(
+                "✅ You're already verified! Just ask me a question.",
+                parse_mode=PARSE_MODE,
+            )
+            return
+
+        # Extract code from command arguments
+        args = context.args  # list of words after /verify
+        if not args:
+            await update.message.reply_text(
+                "Usage: <code>/verify YOUR_ACCESS_CODE</code>\n\n"
+                "Or simply send the code as a regular message.",
+                parse_mode=PARSE_MODE,
+            )
+            return
+
+        code_attempt = " ".join(args).strip()
+
+        # Constant-time comparison to prevent timing attacks
+        if hmac.compare_digest(code_attempt, self._bot_access_code):
+            self.db_ops.verify_user(user.id)
+            logger.info(
+                "User verified via /verify command",
+                user_id=user.id,
+                telegram_user_id=telegram_user_id,
+            )
+            # Delete the message containing the code for security
+            try:
+                await update.message.delete()
+            except Exception:
+                pass
+            await update.message.reply_text(
+                "✅ <b>Access Granted!</b>\n\n"
+                "You're now verified. Welcome aboard!\n"
+                "Type /start to get started or just ask me a question.",
+                parse_mode=PARSE_MODE,
+            )
+        else:
+            logger.warning(
+                "Invalid access code attempt via /verify",
+                telegram_user_id=telegram_user_id,
+            )
+            await update.message.reply_text(
+                "❌ <b>Invalid access code.</b>\n\n"
+                "Please check the code and try again, or contact the bot administrator.",
+                parse_mode=PARSE_MODE,
+            )

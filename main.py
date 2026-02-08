@@ -23,6 +23,7 @@ from telegram.ext import (
 from src.config.settings import settings
 from src.database.init_db import init_database
 from src.database.operations import DatabaseOperations
+from src.services.chart_generator import ChartGenerator
 from src.services.llm_factory import create_llm_service
 from src.services.shopify_graphql import ShopifyGraphQLClient
 from src.learning.pattern_learner import PatternLearner
@@ -107,6 +108,10 @@ class ShopifyAnalyticsBot:
         telegram_adapter = TelegramAdapter()
         logger.info("Telegram adapter initialized")
 
+        # Initialize chart generator for visual analytics
+        chart_generator = ChartGenerator()
+        logger.info("Chart generator initialized")
+
         # Initialize LLM service (Anthropic or OpenAI based on LLM_PROVIDER env var)
         llm_service = create_llm_service(
             settings=settings,
@@ -115,6 +120,7 @@ class ShopifyAnalyticsBot:
             graphql_client=graphql_client,
             template_manager=template_manager,
             recovery_manager=recovery_manager,
+            chart_generator=chart_generator,
         )
 
         # Initialize bot handlers
@@ -161,6 +167,9 @@ class ShopifyAnalyticsBot:
         )
         self.application.add_handler(
             CommandHandler("status", bot_commands.status_command)
+        )
+        self.application.add_handler(
+            CommandHandler("verify", bot_commands.verify_command)
         )
 
         # Register callback query handler (for inline keyboards)
