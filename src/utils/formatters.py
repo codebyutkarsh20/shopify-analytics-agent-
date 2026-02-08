@@ -414,7 +414,8 @@ def format_help_message() -> str:
         "• /connect — Connect your Shopify store\n"
         "• /status — Check connection status\n"
         "• /settings — View preferences\n"
-        "• /forget — Clear learned data\n"
+        "• /resetstore — Reset learning data (keep store)\n"
+        "• /forget — Clear all data\n"
         "• /help — Show this message\n\n"
 
         "<i>Just type in natural language — I'll figure out the rest.</i>"

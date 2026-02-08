@@ -7,6 +7,30 @@ in the Shopify Analytics bot.
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 
+def get_resetstore_confirmation_keyboard() -> InlineKeyboardMarkup:
+    """
+    Create an inline keyboard for resetstore command confirmation.
+
+    Returns a keyboard with options to confirm or cancel resetting store learning data.
+
+    Returns:
+        InlineKeyboardMarkup with Yes/Cancel buttons
+    """
+    buttons = [
+        [
+            InlineKeyboardButton(
+                "✅ Yes, reset store data",
+                callback_data="resetstore_confirm"
+            ),
+            InlineKeyboardButton(
+                "❌ Cancel",
+                callback_data="resetstore_cancel"
+            ),
+        ]
+    ]
+    return InlineKeyboardMarkup(buttons)
+
+
 def get_forget_confirmation_keyboard() -> InlineKeyboardMarkup:
     """
     Create an inline keyboard for forget command confirmation.

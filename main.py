@@ -162,12 +162,21 @@ class ShopifyAnalyticsBot:
         self.application.add_handler(
             CommandHandler("status", bot_commands.status_command)
         )
+        self.application.add_handler(
+            CommandHandler("resetstore", bot_commands.resetstore_command)
+        )
 
         # Register callback query handler (for inline keyboards)
         self.application.add_handler(
             CallbackQueryHandler(
                 bot_commands.handle_forget_callback,
                 pattern="^forget_",
+            )
+        )
+        self.application.add_handler(
+            CallbackQueryHandler(
+                bot_commands.handle_resetstore_callback,
+                pattern="^resetstore_",
             )
         )
 

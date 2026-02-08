@@ -2121,6 +2121,165 @@ class DatabaseOperations:
         finally:
             session.close()
 
+    # ==================== Store Management Operations ====================
+
+    def update_store_credentials(
+        self,
+        store_id: int,
+        shop_domain: str,
+        access_token: str,
+    ) -> Optional[ShopifyStore]:
+        """
+        Update an existing store's domain and access token.
+
+        Args:
+            store_id: Store ID to update.
+            shop_domain: New shop domain.
+            access_token: New access token.
+
+        Returns:
+            Updated ShopifyStore object or None if not found.
+        """
+        session = self.get_session()
+        try:
+            stmt = select(ShopifyStore).where(ShopifyStore.id == store_id)
+            store = session.execute(stmt).scalar_one_or_none()
+
+            if store:
+                store.shop_domain = shop_domain
+                store.access_token = access_token
+                store.installed_at = datetime.utcnow()
+                session.commit()
+                session.refresh(store)
+
+            return store
+        finally:
+            session.close()
+
+    def reset_store_learning_data(self, user_id: int) -> Dict[str, int]:
+        """
+        Clear all learning data for a user when switching stores.
+
+        Unlike clear_user_data(), this preserves the User record, the
+        ShopifyStore record, and ChannelSessions — it only wipes data
+        that is store-specific (conversations, patterns, preferences,
+        sessions, tool usage, errors, feedback) plus global templates
+        and recovery patterns (since those are tied to the old store's
+        schema).
+
+        Args:
+            user_id: User ID whose learning data to reset.
+
+        Returns:
+            Dictionary with counts of deleted items per table.
+        """
+        session = self.get_session()
+        try:
+            counts = {}
+
+            # Delete response feedback first (FK → conversations)
+            feedback = session.execute(
+                select(ResponseFeedback).where(ResponseFeedback.user_id == user_id)
+            ).scalars().all()
+            counts["response_feedback"] = len(feedback)
+            for fb in feedback:
+                session.delete(fb)
+
+            # Delete conversations
+            conversations = session.execute(
+                select(Conversation).where(Conversation.user_id == user_id)
+            ).scalars().all()
+            counts["conversations"] = len(conversations)
+            for conv in conversations:
+                session.delete(conv)
+
+            # Delete sessions
+            sessions_list = session.execute(
+                select(Session).where(Session.user_id == user_id)
+            ).scalars().all()
+            counts["sessions"] = len(sessions_list)
+            for sess in sessions_list:
+                session.delete(sess)
+
+            # Delete query patterns
+            patterns = session.execute(
+                select(QueryPattern).where(QueryPattern.user_id == user_id)
+            ).scalars().all()
+            counts["patterns"] = len(patterns)
+            for pattern in patterns:
+                session.delete(pattern)
+
+            # Delete preferences
+            preferences = session.execute(
+                select(UserPreference).where(UserPreference.user_id == user_id)
+            ).scalars().all()
+            counts["preferences"] = len(preferences)
+            for pref in preferences:
+                session.delete(pref)
+
+            # Delete tool usage
+            tool_usage = session.execute(
+                select(ToolUsage).where(ToolUsage.user_id == user_id)
+            ).scalars().all()
+            counts["tool_usage"] = len(tool_usage)
+            for usage in tool_usage:
+                session.delete(usage)
+
+            # Delete query errors
+            query_errors = session.execute(
+                select(QueryError).where(QueryError.user_id == user_id)
+            ).scalars().all()
+            counts["query_errors"] = len(query_errors)
+            for qe in query_errors:
+                session.delete(qe)
+
+            # Clear analytics cache for all user stores
+            stores = session.execute(
+                select(ShopifyStore).where(ShopifyStore.user_id == user_id)
+            ).scalars().all()
+            cache_count = 0
+            for store in stores:
+                caches = session.execute(
+                    select(AnalyticsCache).where(AnalyticsCache.store_id == store.id)
+                ).scalars().all()
+                cache_count += len(caches)
+                for cache in caches:
+                    session.delete(cache)
+            counts["analytics_cache"] = cache_count
+
+            # Clear global templates and recovery patterns
+            # (these are not user-scoped but are store-schema-dependent)
+            templates = session.execute(select(QueryTemplate)).scalars().all()
+            counts["query_templates"] = len(templates)
+            for tmpl in templates:
+                session.delete(tmpl)
+
+            recovery_patterns = session.execute(
+                select(ErrorRecoveryPattern)
+            ).scalars().all()
+            counts["error_recovery_patterns"] = len(recovery_patterns)
+            for rp in recovery_patterns:
+                session.delete(rp)
+
+            global_insights = session.execute(
+                select(GlobalInsight)
+            ).scalars().all()
+            counts["global_insights"] = len(global_insights)
+            for gi in global_insights:
+                session.delete(gi)
+
+            # Reset user interaction count
+            user = session.execute(
+                select(User).where(User.id == user_id)
+            ).scalar_one_or_none()
+            if user:
+                user.interaction_count = 0
+
+            session.commit()
+            return counts
+        finally:
+            session.close()
+
     # ==================== Data Cleanup Operations ====================
 
     def clear_user_data(self, user_id: int) -> Dict[str, int]:

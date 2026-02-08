@@ -20,7 +20,7 @@ from src.utils.formatters import (
     format_help_message,
     format_error_message,
 )
-from src.bot.keyboards import get_forget_confirmation_keyboard
+from src.bot.keyboards import get_forget_confirmation_keyboard, get_resetstore_confirmation_keyboard
 
 logger = get_logger(__name__)
 
@@ -42,18 +42,22 @@ class BotCommands:
     def _auto_connect_from_env(self, user_id: int) -> bool:
         """
         Auto-connect a store from .env if credentials are configured
-        and user has no store yet.
+        and user has no store yet.  If the .env credentials differ
+        from the currently stored store, update the store record and
+        clear all stale learning data automatically.
 
-        Returns True if auto-connected, False otherwise.
+        Returns True if a new store was connected or credentials were
+        updated, False if nothing changed.
         """
-        store = self.db_ops.get_store_by_user(user_id)
-        if store:
-            return False  # Already connected
-
-        # Check if .env has valid credentials
         domain = settings.shopify.shop_domain
         token = settings.shopify.access_token
-        if domain and token:
+        if not domain or not token:
+            return False
+
+        store = self.db_ops.get_store_by_user(user_id)
+
+        if store is None:
+            # No store yet — fresh connect
             self.db_ops.add_store(
                 user_id=user_id,
                 shop_domain=domain,
@@ -65,7 +69,50 @@ class BotCommands:
                 domain=domain,
             )
             return True
-        return False
+
+        # Store exists — check if credentials changed
+        if store.shop_domain == domain and store.access_token == token:
+            return False  # Same store, nothing to do
+
+        # Credentials changed → switching stores
+        old_domain = store.shop_domain
+        logger.info(
+            "Store change detected — resetting learning data",
+            user_id=user_id,
+            old_domain=old_domain,
+            new_domain=domain,
+        )
+
+        # Clear all learning data tied to the old store
+        counts = self.db_ops.reset_store_learning_data(user_id)
+        logger.info(
+            "Learning data reset complete",
+            user_id=user_id,
+            deleted_counts=counts,
+        )
+
+        # Update the store record with new credentials
+        self.db_ops.update_store_credentials(
+            store_id=store.id,
+            shop_domain=domain,
+            access_token=token,
+        )
+        logger.info(
+            "Store credentials updated",
+            user_id=user_id,
+            old_domain=old_domain,
+            new_domain=domain,
+        )
+
+        # Re-seed query templates for the new store
+        try:
+            from src.learning.template_seeds import seed_templates
+            seed_templates(self.db_ops)
+            logger.info("Re-seeded query templates for new store")
+        except Exception as e:
+            logger.warning("Template re-seeding failed", error=str(e))
+
+        return True
 
     async def start_command(
         self,
@@ -294,7 +341,8 @@ class BotCommands:
                 f"• Time range: <code>{time_range}</code>\n"
                 f"• Query type: <code>{query_type}</code>\n\n"
                 f"<i>Preferences are learned automatically from your queries.</i>\n\n"
-                f"• /forget — Reset all learned data\n"
+                f"• /resetstore — Reset learning data (keep store)\n"
+                f"• /forget — Reset all data\n"
                 f"• /connect — Reconnect store\n"
                 f"• /help — All commands"
             )
@@ -419,3 +467,99 @@ class BotCommands:
             logger.error("Error in status command", error=str(e), exc_info=True)
             error_msg = format_error_message(e)
             await update.message.reply_text(error_msg, parse_mode=PARSE_MODE)
+
+    async def resetstore_command(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /resetstore command — clear learning data for the current store."""
+        logger.info("Resetstore command received", user_id=update.effective_user.id)
+
+        try:
+            user = self.db_ops.get_or_create_user(
+                telegram_user_id=update.effective_user.id,
+                telegram_username=update.effective_user.username,
+                first_name=update.effective_user.first_name,
+            )
+
+            store = self.db_ops.get_store_by_user(user.id)
+            if not store:
+                await update.message.reply_text(
+                    "❌ No store connected. Use /connect first.",
+                    parse_mode=PARSE_MODE,
+                )
+                return
+
+            domain = escape(store.shop_domain)
+            confirmation_msg = (
+                "⚠️ <b>Reset Store Learning Data</b>\n\n"
+                f"Currently connected to <b>{domain}</b>.\n\n"
+                "This will delete:\n"
+                "• All conversation history\n"
+                "• All query patterns & preferences\n"
+                "• All learned templates & recovery patterns\n"
+                "• All cached analytics\n\n"
+                "Your store connection will be kept.\n"
+                "This action <b>cannot be undone</b>. Continue?"
+            )
+
+            keyboard = get_resetstore_confirmation_keyboard()
+            await update.message.reply_text(
+                confirmation_msg,
+                reply_markup=keyboard,
+                parse_mode=PARSE_MODE,
+            )
+
+        except Exception as e:
+            logger.error("Error in resetstore command", error=str(e), exc_info=True)
+            error_msg = format_error_message(e)
+            await update.message.reply_text(error_msg, parse_mode=PARSE_MODE)
+
+    async def handle_resetstore_callback(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle callback from resetstore confirmation keyboard."""
+        query = update.callback_query
+        user_id = update.effective_user.id
+
+        logger.info("Resetstore callback received", user_id=user_id, action=query.data)
+
+        await query.answer()
+
+        try:
+            if query.data == "resetstore_confirm":
+                user = self.db_ops.get_or_create_user(
+                    telegram_user_id=user_id,
+                    telegram_username=update.effective_user.username,
+                    first_name=update.effective_user.first_name,
+                )
+                counts = self.db_ops.reset_store_learning_data(user.id)
+                logger.info("Store learning data reset", user_id=user.id, counts=counts)
+
+                # Re-seed query templates
+                try:
+                    from src.learning.template_seeds import seed_templates
+                    seed_templates(self.db_ops)
+                except Exception as e:
+                    logger.warning("Template re-seeding failed", error=str(e))
+
+                total = sum(counts.values())
+                confirm_msg = (
+                    "✅ <b>Store Data Reset</b>\n\n"
+                    f"Cleared {total} items across {len(counts)} tables.\n"
+                    "I'll start fresh learning your preferences again."
+                )
+                await query.edit_message_text(confirm_msg, parse_mode=PARSE_MODE)
+
+            elif query.data == "resetstore_cancel":
+                cancel_msg = "❌ Cancelled. Your data remains intact."
+                await query.edit_message_text(cancel_msg, parse_mode=PARSE_MODE)
+                logger.info("User cancelled resetstore operation", user_id=user_id)
+
+        except Exception as e:
+            logger.error("Error in resetstore callback", error=str(e), exc_info=True)
+            error_msg = format_error_message(e)
+            await query.edit_message_text(error_msg, parse_mode=PARSE_MODE)
