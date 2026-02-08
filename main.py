@@ -2,7 +2,7 @@
 Shopify Analytics Agent - Main Entry Point
 
 A Python-based Shopify analytics agent that connects to a Shopify store
-via MCP server, provides natural language analysis through Telegram,
+via direct GraphQL API, provides natural language analysis through Telegram,
 and learns from user interactions to provide increasingly relevant insights.
 """
 
@@ -23,15 +23,19 @@ from telegram.ext import (
 from src.config.settings import settings
 from src.database.init_db import init_database
 from src.database.operations import DatabaseOperations
-from src.services.mcp_service import MCPService
-from src.services.shopify_service import ShopifyService
 from src.services.claude_service import ClaudeService
-from src.services.analytics_service import AnalyticsService
+from src.services.shopify_graphql import ShopifyGraphQLClient
 from src.learning.pattern_learner import PatternLearner
 from src.learning.context_builder import ContextBuilder
 from src.learning.preference_manager import PreferenceManager
+from src.learning.session_manager import SessionManager
+from src.learning.template_manager import TemplateManager
+from src.learning.recovery_manager import RecoveryManager
+from src.learning.feedback_analyzer import FeedbackAnalyzer
+from src.learning.insight_aggregator import InsightAggregator
 from src.bot.handlers import MessageHandler
 from src.bot.commands import BotCommands
+from src.bot.telegram_adapter import TelegramAdapter
 from src.utils.logger import setup_logging, get_logger
 
 
@@ -42,7 +46,6 @@ class ShopifyAnalyticsBot:
     """Main application class that wires all components together."""
 
     def __init__(self):
-        self.mcp_service: MCPService | None = None
         self.application: Application | None = None
         self._running = False
 
@@ -77,39 +80,44 @@ class ShopifyAnalyticsBot:
             return False
         logger.info("Database initialized successfully")
 
-        # Initialize MCP service
-        logger.info("Starting MCP service...")
-        self.mcp_service = MCPService(settings)
-        try:
-            await self.mcp_service.start()
-            logger.info("MCP service started successfully")
-        except Exception as e:
-            logger.warning(
-                "MCP service failed to start - bot will work but cannot fetch Shopify data",
-                error=str(e),
-            )
-            # Continue anyway - user might need to connect store first
-
-        # Initialize services
-        shopify_service = ShopifyService(self.mcp_service)
+        # Initialize core services
         context_builder = ContextBuilder(db_ops)
-        claude_service = ClaudeService(
-            settings=settings,
-            mcp_service=self.mcp_service,
-            db_ops=db_ops,
-            context_builder=context_builder,
-        )
-        analytics_service = AnalyticsService(shopify_service, db_ops)
 
-        # Initialize learning system
+        # Initialize Shopify GraphQL client (direct API — no MCP subprocess needed)
+        graphql_client = None
+        if settings.shopify.shop_domain and settings.shopify.access_token:
+            graphql_client = ShopifyGraphQLClient(settings)
+            logger.info("ShopifyGraphQLClient initialized for direct Shopify API access")
+        else:
+            logger.warning("GraphQL client not initialized — missing Shopify credentials")
+
+        # Initialize learning system components
         pattern_learner = PatternLearner(db_ops)
         preference_manager = PreferenceManager(
             db_ops, pattern_threshold=settings.learning_pattern_threshold
         )
+        session_manager = SessionManager(db_ops, settings)
+        template_manager = TemplateManager(db_ops)
+        recovery_manager = RecoveryManager(db_ops)
+        feedback_analyzer = FeedbackAnalyzer()
+        insight_aggregator = InsightAggregator(db_ops)
+        logger.info("Learning system components initialized")
+
+        # Initialize channel adapter
+        telegram_adapter = TelegramAdapter()
+        logger.info("Telegram adapter initialized")
+
+        # Initialize Claude service with template and recovery learning
+        claude_service = ClaudeService(
+            settings=settings,
+            db_ops=db_ops,
+            context_builder=context_builder,
+            graphql_client=graphql_client,
+            template_manager=template_manager,
+            recovery_manager=recovery_manager,
+        )
 
         # Initialize bot handlers
-        # Note: bot_commands is created first so it can be passed to message_handler
-        # for handling the connect flow (credentials input)
         bot_commands = BotCommands(
             db_ops=db_ops,
             preference_manager=preference_manager,
@@ -120,6 +128,11 @@ class ShopifyAnalyticsBot:
             preference_manager=preference_manager,
             db_ops=db_ops,
             bot_commands=bot_commands,
+            session_manager=session_manager,
+            feedback_analyzer=feedback_analyzer,
+            template_manager=template_manager,
+            insight_aggregator=insight_aggregator,
+            telegram_adapter=telegram_adapter,
         )
 
         # Build Telegram application
@@ -215,10 +228,6 @@ class ShopifyAnalyticsBot:
             await self.application.shutdown()
             logger.info("Telegram bot stopped")
 
-        if self.mcp_service:
-            await self.mcp_service.stop()
-            logger.info("MCP service stopped")
-
         logger.info("Bot shutdown complete")
         print("\n👋 Bot stopped. Goodbye!")
 
@@ -229,7 +238,7 @@ def main():
         """
 ╔══════════════════════════════════════════╗
 ║   Shopify Analytics Agent               ║
-║   Powered by Claude AI + MCP            ║
+║   Powered by Claude AI + GraphQL        ║
 ╚══════════════════════════════════════════╝
 """
     )

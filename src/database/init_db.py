@@ -3,6 +3,7 @@
 import logging
 from typing import Optional
 
+from sqlalchemy import text, inspect
 from src.database.models import Base
 from src.database.operations import DatabaseOperations
 
@@ -37,6 +38,25 @@ def init_database(database_url: Optional[str] = None) -> DatabaseOperations:
     except Exception as e:
         logger.error(f"Failed to initialize database: {e}")
         raise
+
+    # Migration: rename mcp_tool_usage → tool_usage if needed
+    try:
+        inspector = inspect(db_ops.engine)
+        existing_tables = inspector.get_table_names()
+        if "mcp_tool_usage" in existing_tables and "tool_usage" not in existing_tables:
+            with db_ops.engine.connect() as conn:
+                conn.execute(text("ALTER TABLE mcp_tool_usage RENAME TO tool_usage"))
+                conn.commit()
+            logger.info("Migrated table: mcp_tool_usage → tool_usage")
+    except Exception as e:
+        logger.warning("Table migration check failed (safe to ignore on fresh DB)", error=str(e))
+
+    # Seed query templates on first run
+    try:
+        from src.learning.template_seeds import seed_templates
+        seed_templates(db_ops)
+    except Exception as e:
+        logger.warning("Template seeding failed", error=str(e))
 
     return db_ops
 

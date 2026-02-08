@@ -114,11 +114,14 @@ def sample_orders():
 
 
 @pytest.fixture
-def mock_mcp_service():
-    """Return a mock MCPService for testing without external dependencies.
+def mock_graphql_client():
+    """Return a mock ShopifyGraphQLClient for testing without external dependencies.
 
     Uses AsyncMock to support async methods.
     """
     mock = AsyncMock()
-    mock.call_tool = AsyncMock()
+    mock.query_products = AsyncMock(return_value={"products": []})
+    mock.query_orders = AsyncMock(return_value={"orders": []})
+    mock.query_customers = AsyncMock(return_value={"customers": []})
+    mock.execute_raw_query = AsyncMock(return_value={})
     return mock

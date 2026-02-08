@@ -87,6 +87,13 @@ class Settings:
     cache_ttl_seconds: int = 300  # 5 minutes
     analytics_cache_ttl_seconds: int = 3600  # 1 hour
 
+    # Session management
+    session_hard_timeout_seconds: int = 7200      # 2 hours — definitely new session
+    session_soft_timeout_seconds: int = 1800      # 30 minutes — likely new session if topic changed
+    session_min_gap_seconds: int = 300            # 5 minutes — min gap for topic-shift detection
+    aggregation_interval: int = 50                # Run global insight aggregation every N interactions
+    max_context_tokens: int = 2000                # Token budget for learning context in system prompt
+
     def validate(self) -> list[str]:
         """Validate required configuration. Returns list of missing items."""
         missing = []

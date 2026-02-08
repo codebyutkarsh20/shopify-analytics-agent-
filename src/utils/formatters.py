@@ -20,72 +20,139 @@ def markdown_to_telegram_html(text: str) -> str:
     """
     Convert Claude's Markdown response to Telegram-compatible HTML.
 
-    Telegram HTML supports: <b>, <i>, <code>, <pre>, <a href="">.
-    This function converts common Markdown patterns (headings, bold,
-    italic, code, links, bullets, horizontal rules) into clean
-    Telegram HTML while preserving readability.
+    Telegram HTML supports: <b>, <i>, <code>, <pre>, <a href="">, <s>.
+    This function converts common Markdown patterns into clean Telegram
+    HTML while preserving readability. Includes a final sanitiser pass
+    to strip any malformed/unclosed tags so Telegram never sees broken
+    HTML (which causes it to show raw tags).
     """
     if not text:
         return text
 
-    # -- Step 1: Protect code blocks and inline code from processing --
+    # ── Step 1: Protect code blocks & inline code from processing ──
     protected = {}
     counter = [0]
 
-    def _protect(replacement_html):
+    def _protect(replacement_html: str) -> str:
         key = f"\x00P{counter[0]}\x00"
         protected[key] = replacement_html
         counter[0] += 1
         return key
 
-    # Code blocks: ```lang\n...\n```
+    # Fenced code blocks: ```lang\n...\n```
     def _code_block(m):
         return _protect(f"<pre>{html.escape(m.group(1).strip())}</pre>")
-
     text = re.sub(r"```(?:\w*\n)?(.*?)```", _code_block, text, flags=re.DOTALL)
 
     # Inline code: `...`
     def _inline_code(m):
         return _protect(f"<code>{html.escape(m.group(1))}</code>")
-
     text = re.sub(r"`([^`]+)`", _inline_code, text)
 
-    # -- Step 2: Escape HTML entities in the remaining plain text --
+    # ── Step 2: Escape HTML entities in remaining plain text ──
     text = html.escape(text)
 
-    # -- Step 3: Convert Markdown → Telegram HTML --
+    # ── Step 3: Convert Markdown → Telegram HTML ──
 
-    # Headings: ## **text** or ## text → bold line
+    # Headings: ## text  or  ## **text** → bold on its own line
     def _heading(m):
         heading_text = m.group(1).strip().strip("*").strip()
-        return f"\n<b>{heading_text}</b>"
-
+        return f"\n<b>{heading_text}</b>\n"
     text = re.sub(r"^#{1,6}\s+(.+?)\s*$", _heading, text, flags=re.MULTILINE)
 
     # Horizontal rules → blank line
-    text = re.sub(r"^-{3,}\s*$", "", text, flags=re.MULTILINE)
-    text = re.sub(r"^\*{3,}\s*$", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^[-*_]{3,}\s*$", "", text, flags=re.MULTILINE)
 
-    # Bold: **text**
+    # Bold: **text**  (non-greedy, allows multiword)
     text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
 
-    # Italic: *text* (but not bullet points at line start)
+    # Italic: *text*  (not at line-start bullets, not inside words)
     text = re.sub(r"(?<![*\w])\*([^*\n]+?)\*(?![*\w])", r"<i>\1</i>", text)
+
+    # Strikethrough: ~~text~~
+    text = re.sub(r"~~(.+?)~~", r"<s>\1</s>", text)
 
     # Links: [text](url)
     text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', text)
 
-    # Bullet points: - item or * item → • item
+    # Numbered lists: "1. item" → "1. item"  (keep number, just clean up)
+    # Already looks fine in Telegram — just ensure consistent spacing
+    text = re.sub(r"^(\d+)\.\s+", r"\1. ", text, flags=re.MULTILINE)
+
+    # Bullet points: - item or * item → • item  (top-level)
     text = re.sub(r"^[-*]\s+", "• ", text, flags=re.MULTILINE)
 
-    # -- Step 4: Restore protected code blocks/inline code --
+    # Sub-bullets: "  - item" or "  * item" → "  ◦ item"
+    text = re.sub(r"^(\s{2,})[-*]\s+", r"\1◦ ", text, flags=re.MULTILINE)
+
+    # ── Step 4: Restore protected code blocks / inline code ──
     for key, value in protected.items():
         text = text.replace(key, value)
 
-    # -- Step 5: Clean up excessive blank lines --
+    # ── Step 5: Sanitise — ensure all HTML tags are properly balanced ──
+    text = _sanitise_telegram_html(text)
+
+    # ── Step 6: Clean up excessive blank lines ──
     text = re.sub(r"\n{3,}", "\n\n", text)
 
     return text.strip()
+
+
+# Tags that Telegram's HTML parser supports
+_TELEGRAM_TAGS = {"b", "i", "u", "s", "code", "pre", "a"}
+
+
+def _sanitise_telegram_html(text: str) -> str:
+    """
+    Ensure the HTML string only contains balanced, Telegram-supported tags.
+
+    If a tag is opened but never closed (or vice-versa), it's stripped out
+    so Telegram doesn't reject the whole message and show raw tags.
+    """
+    # Find all HTML-like tags in the text
+    tag_pattern = re.compile(r"<(/?)(\w+)(\s[^>]*)?>")
+
+    # First pass: collect every tag and its position
+    tag_stack = []   # stack of (tag_name, start_pos) for open tags
+    bad_spans = []   # (start, end) spans of tags to strip
+
+    for m in tag_pattern.finditer(text):
+        is_close = bool(m.group(1))
+        tag_name = m.group(2).lower()
+
+        # Ignore tags Telegram doesn't support → strip them
+        if tag_name not in _TELEGRAM_TAGS:
+            bad_spans.append((m.start(), m.end()))
+            continue
+
+        if not is_close:
+            tag_stack.append((tag_name, m.start(), m.end()))
+        else:
+            # Try to match with the most recent open tag of the same name
+            matched = False
+            for idx in range(len(tag_stack) - 1, -1, -1):
+                if tag_stack[idx][0] == tag_name:
+                    tag_stack.pop(idx)
+                    matched = True
+                    break
+            if not matched:
+                # Closing tag with no opener → strip it
+                bad_spans.append((m.start(), m.end()))
+
+    # Any remaining open tags in the stack are unmatched → strip them
+    for tag_name, start, end in tag_stack:
+        bad_spans.append((start, end))
+
+    if not bad_spans:
+        return text
+
+    # Remove bad spans from right to left so positions stay valid
+    bad_spans.sort(reverse=True)
+    chars = list(text)
+    for start, end in bad_spans:
+        del chars[start:end]
+
+    return "".join(chars)
 
 
 def format_currency(amount: float, currency_symbol: str = "$") -> str:

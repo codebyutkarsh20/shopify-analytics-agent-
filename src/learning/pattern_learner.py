@@ -4,12 +4,20 @@ Learns from user queries to understand their analysis patterns and preferences.
 """
 
 import re
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+@dataclass
+class Intent:
+    """Two-level intent classification."""
+    coarse: str   # revenue, orders, products, customers, comparison, general
+    fine: str     # products_ranking_revenue_last_30_days, etc.
 
 
 class PatternLearner:
@@ -121,6 +129,14 @@ class PatternLearner:
                 context=business_context,
             )
 
+        # 5. Store fine-grained intent
+        intent = self.classify_intent(query)
+        self.db_ops.update_pattern_frequency(user_id, "intent", intent.fine)
+
+        # 6. Store complexity
+        complexity = self.assess_query_complexity(query)
+        self.db_ops.update_pattern_frequency(user_id, "complexity", complexity)
+
         logger.info("Query learning completed", user_id=user_id)
 
     def detect_query_type(self, query: str) -> str:
@@ -204,3 +220,78 @@ class PatternLearner:
             return context
 
         return None
+
+    def classify_intent(self, query: str) -> Intent:
+        """Two-level intent classification.
+
+        Coarse: the existing query type (revenue, orders, etc.)
+        Fine: a more specific intent string combining type + ranking + metric + time
+
+        Args:
+            query: The user query string
+
+        Returns:
+            Intent object with coarse and fine-grained classifications
+        """
+        coarse = self.detect_query_type(query)
+        fine = self._build_fine_intent(coarse, query)
+        return Intent(coarse=coarse, fine=fine)
+
+    def _build_fine_intent(self, coarse: str, query: str) -> str:
+        """Build fine-grained intent string from coarse intent and query.
+
+        Args:
+            coarse: The coarse intent (query type)
+            query: The user query string
+
+        Returns:
+            Fine-grained intent string combining type, ranking, metric, and time
+        """
+        query_lower = query.lower()
+        metrics = self.extract_metrics(query)
+        time_range = self.extract_time_range(query)
+        has_ranking = any(
+            w in query_lower
+            for w in ["top", "best", "worst", "highest", "lowest", "most", "least"]
+        )
+        has_comparison = coarse == "comparison"
+
+        parts = [coarse]
+        if has_ranking:
+            parts.append("ranking")
+        if metrics:
+            parts.append(metrics[0])
+        if time_range:
+            parts.append(time_range)
+        if has_comparison:
+            parts.append("comparison")
+        return "_".join(parts)
+
+    def assess_query_complexity(self, query: str) -> str:
+        """Assess the complexity of a query.
+
+        Evaluates signals including multiple metrics, comparisons, conjunctions,
+        and query length to classify complexity as simple, moderate, or complex.
+
+        Args:
+            query: The user query string
+
+        Returns:
+            Complexity level: "simple", "moderate", or "complex"
+        """
+        signals = 0
+        if len(self.extract_metrics(query)) > 1:
+            signals += 1
+        if self.detect_query_type(query) == "comparison":
+            signals += 1
+        if any(w in query.lower() for w in ["and", "also", "plus", "as well as"]):
+            signals += 1
+        if len(query.split()) > 20:
+            signals += 1
+
+        if signals == 0:
+            return "simple"
+        elif signals <= 2:
+            return "moderate"
+        else:
+            return "complex"

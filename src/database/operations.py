@@ -2,9 +2,11 @@
 
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
+import json
+import hashlib
 
 from sqlalchemy import create_engine, select, func, and_
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session as SQLSession, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from src.database.models import (
@@ -14,8 +16,15 @@ from src.database.models import (
     Conversation,
     QueryPattern,
     UserPreference,
-    MCPToolUsage,
+    ToolUsage,
     AnalyticsCache,
+    QueryError,
+    Session,
+    QueryTemplate,
+    ErrorRecoveryPattern,
+    GlobalInsight,
+    ResponseFeedback,
+    ChannelSession,
 )
 
 
@@ -44,7 +53,7 @@ class DatabaseOperations:
 
         self.SessionLocal = sessionmaker(bind=self.engine, expire_on_commit=False)
 
-    def get_session(self) -> Session:
+    def get_session(self) -> SQLSession:
         """
         Get a new database session.
 
@@ -71,8 +80,15 @@ class DatabaseOperations:
             "conversations",
             "query_patterns",
             "user_preferences",
-            "mcp_tool_usage",
+            "tool_usage",
             "analytics_cache",
+            "query_errors",
+            "sessions",
+            "query_templates",
+            "error_recovery_patterns",
+            "global_insights",
+            "response_feedback",
+            "channel_sessions",
         }
         existing_tables = set(inspector.get_table_names())
         return required_tables.issubset(existing_tables)
@@ -202,6 +218,24 @@ class DatabaseOperations:
         finally:
             session.close()
 
+    def increment_user_interaction(self, user_id: int) -> None:
+        """
+        Increment interaction count for a user.
+
+        Args:
+            user_id: User ID.
+        """
+        session = self.get_session()
+        try:
+            stmt = select(User).where(User.id == user_id)
+            user = session.execute(stmt).scalar_one_or_none()
+
+            if user:
+                user.interaction_count = (user.interaction_count or 0) + 1
+                session.commit()
+        finally:
+            session.close()
+
     # ==================== Store Operations ====================
 
     def add_store(
@@ -294,6 +328,10 @@ class DatabaseOperations:
         message: str,
         response: str,
         query_type: str,
+        session_id: Optional[int] = None,
+        channel_type: str = "telegram",
+        tool_calls_json: Optional[str] = None,
+        template_id_used: Optional[int] = None,
     ) -> Conversation:
         """
         Save a user conversation.
@@ -303,6 +341,10 @@ class DatabaseOperations:
             message: User's message.
             response: Agent's response.
             query_type: Type of query (e.g., "sales", "products", "analytics").
+            session_id: Optional session ID.
+            channel_type: Channel type (default "telegram").
+            tool_calls_json: Optional JSON string of tool calls.
+            template_id_used: Optional query template ID used.
 
         Returns:
             Conversation object.
@@ -314,11 +356,38 @@ class DatabaseOperations:
                 message=message,
                 response=response,
                 query_type=query_type,
+                session_id=session_id,
+                channel_type=channel_type,
+                tool_calls_json=tool_calls_json,
+                template_id_used=template_id_used,
             )
             session.add(conversation)
             session.commit()
             session.refresh(conversation)
             return conversation
+        finally:
+            session.close()
+
+    def get_latest_conversation(self, user_id: int, limit: int = 1) -> List[Conversation]:
+        """
+        Get most recent conversation(s) for a user.
+
+        Args:
+            user_id: User ID.
+            limit: Number of conversations to return.
+
+        Returns:
+            List of Conversation objects ordered by most recent first.
+        """
+        session = self.get_session()
+        try:
+            stmt = (
+                select(Conversation)
+                .where(Conversation.user_id == user_id)
+                .order_by(Conversation.created_at.desc())
+                .limit(limit)
+            )
+            return session.execute(stmt).scalars().all()
         finally:
             session.close()
 
@@ -606,7 +675,7 @@ class DatabaseOperations:
         preferences = self.get_preferences(user_id)
         return {pref.preference_key: pref.preference_value for pref in preferences}
 
-    # ==================== MCP Tool Usage Operations ====================
+    # ==================== Tool Usage Operations ====================
 
     def log_tool_usage(
         self,
@@ -615,9 +684,9 @@ class DatabaseOperations:
         parameters: str,
         success: bool,
         execution_time_ms: int,
-    ) -> MCPToolUsage:
+    ) -> ToolUsage:
         """
-        Log MCP tool usage.
+        Log tool usage.
 
         Args:
             user_id: User ID.
@@ -627,11 +696,11 @@ class DatabaseOperations:
             execution_time_ms: Execution time in milliseconds.
 
         Returns:
-            MCPToolUsage object.
+            ToolUsage object.
         """
         session = self.get_session()
         try:
-            tool_usage = MCPToolUsage(
+            tool_usage = ToolUsage(
                 user_id=user_id,
                 tool_name=tool_name,
                 parameters=parameters,
@@ -665,15 +734,15 @@ class DatabaseOperations:
         session = self.get_session()
         try:
             cutoff_date = datetime.utcnow() - timedelta(days=days)
-            stmt = select(MCPToolUsage).where(
+            stmt = select(ToolUsage).where(
                 and_(
-                    MCPToolUsage.user_id == user_id,
-                    MCPToolUsage.created_at >= cutoff_date,
+                    ToolUsage.user_id == user_id,
+                    ToolUsage.created_at >= cutoff_date,
                 )
             )
 
             if tool_name:
-                stmt = stmt.where(MCPToolUsage.tool_name == tool_name)
+                stmt = stmt.where(ToolUsage.tool_name == tool_name)
 
             usage_records = session.execute(stmt).scalars().all()
 
@@ -693,6 +762,259 @@ class DatabaseOperations:
                 "success_rate": (successful / total * 100) if total > 0 else 0,
                 "avg_execution_time_ms": avg_time_ms,
             }
+        finally:
+            session.close()
+
+    def get_tool_stats_by_intent(self, intent_category: str) -> List[Dict]:
+        """
+        Get tool usage statistics grouped by tool name for an intent category.
+
+        Args:
+            intent_category: Intent category to filter by.
+
+        Returns:
+            List of dictionaries with tool stats: {tool, successes, failures, avg_time}.
+        """
+        session = self.get_session()
+        try:
+            # Get all templates for this intent
+            stmt = select(QueryTemplate).where(
+                QueryTemplate.intent_category == intent_category
+            )
+            templates = session.execute(stmt).scalars().all()
+
+            tools_used = {}
+            for template in templates:
+                tool = template.tool_name
+                if tool not in tools_used:
+                    tools_used[tool] = {
+                        "tool": tool,
+                        "successes": template.success_count or 0,
+                        "failures": template.failure_count or 0,
+                        "avg_time": template.avg_execution_time_ms or 0,
+                    }
+                else:
+                    tools_used[tool]["successes"] += template.success_count or 0
+                    tools_used[tool]["failures"] += template.failure_count or 0
+
+            return list(tools_used.values())
+        finally:
+            session.close()
+
+    # ==================== Query Error Learning Operations ====================
+
+    def log_query_error(
+        self,
+        user_id: int,
+        tool_name: str,
+        query_text: str,
+        error_message: str,
+        error_type: str = "unknown",
+        lesson: Optional[str] = None,
+    ) -> QueryError:
+        """
+        Log a failed tool call for learning purposes.
+
+        Args:
+            user_id: User ID (0 for system-level errors).
+            tool_name: Name of the tool that failed.
+            query_text: The query/parameters that caused the error.
+            error_message: The error message returned.
+            error_type: Category of error (e.g., 'graphql_syntax', 'invalid_field',
+                        'api_error', 'timeout', 'unknown').
+            lesson: Optional human-readable lesson about what went wrong.
+
+        Returns:
+            QueryError object.
+        """
+        session = self.get_session()
+        try:
+            query_error = QueryError(
+                user_id=user_id,
+                tool_name=tool_name,
+                query_text=query_text,
+                error_message=error_message,
+                error_type=error_type,
+                lesson=lesson,
+                resolved=False,
+            )
+            session.add(query_error)
+            session.commit()
+            session.refresh(query_error)
+            return query_error
+        finally:
+            session.close()
+
+    def get_recent_query_errors(
+        self,
+        user_id: int = 0,
+        tool_name: Optional[str] = None,
+        limit: int = 10,
+        days: int = 30,
+        include_resolved: bool = False,
+    ) -> List[QueryError]:
+        """
+        Get recent query errors for learning context.
+
+        Args:
+            user_id: User ID (0 for system-level errors).
+            tool_name: Optional filter by tool name.
+            limit: Maximum number of errors to return.
+            days: Number of days to look back.
+            include_resolved: Whether to include resolved errors.
+
+        Returns:
+            List of QueryError objects sorted by most recent first.
+        """
+        session = self.get_session()
+        try:
+            cutoff_date = datetime.utcnow() - timedelta(days=days)
+            conditions = [QueryError.created_at >= cutoff_date]
+
+            # user_id=0 means system-level — include all; otherwise filter
+            if user_id > 0:
+                conditions.append(QueryError.user_id == user_id)
+
+            if tool_name:
+                conditions.append(QueryError.tool_name == tool_name)
+
+            if not include_resolved:
+                conditions.append(QueryError.resolved == False)
+
+            stmt = (
+                select(QueryError)
+                .where(and_(*conditions))
+                .order_by(QueryError.created_at.desc())
+                .limit(limit)
+            )
+            return session.execute(stmt).scalars().all()
+        finally:
+            session.close()
+
+    def get_similar_query_errors(
+        self,
+        tool_name: str,
+        limit: int = 5,
+    ) -> List[QueryError]:
+        """
+        Get past errors for a specific tool to help avoid repeating mistakes.
+
+        Args:
+            tool_name: Tool name to find past errors for.
+            limit: Maximum number of errors to return.
+
+        Returns:
+            List of QueryError objects for the given tool.
+        """
+        session = self.get_session()
+        try:
+            stmt = (
+                select(QueryError)
+                .where(QueryError.tool_name == tool_name)
+                .order_by(QueryError.created_at.desc())
+                .limit(limit)
+            )
+            return session.execute(stmt).scalars().all()
+        finally:
+            session.close()
+
+    def mark_error_resolved(self, error_id: int, lesson: Optional[str] = None) -> bool:
+        """
+        Mark a query error as resolved with an optional lesson learned.
+
+        Args:
+            error_id: QueryError ID.
+            lesson: What was learned from this error.
+
+        Returns:
+            True if the error was found and updated, False otherwise.
+        """
+        session = self.get_session()
+        try:
+            stmt = select(QueryError).where(QueryError.id == error_id)
+            error = session.execute(stmt).scalar_one_or_none()
+
+            if error is None:
+                return False
+
+            error.resolved = True
+            if lesson:
+                error.lesson = lesson
+            session.commit()
+            return True
+        finally:
+            session.close()
+
+    def get_error_summary(self, days: int = 30) -> Dict[str, Any]:
+        """
+        Get a summary of query errors for monitoring.
+
+        Args:
+            days: Number of days to look back.
+
+        Returns:
+            Dictionary with error statistics.
+        """
+        session = self.get_session()
+        try:
+            cutoff_date = datetime.utcnow() - timedelta(days=days)
+            stmt = select(QueryError).where(QueryError.created_at >= cutoff_date)
+            errors = session.execute(stmt).scalars().all()
+
+            total = len(errors)
+            resolved = sum(1 for e in errors if e.resolved)
+
+            # Count by tool name
+            by_tool: Dict[str, int] = {}
+            for e in errors:
+                by_tool[e.tool_name] = by_tool.get(e.tool_name, 0) + 1
+
+            # Count by error type
+            by_type: Dict[str, int] = {}
+            for e in errors:
+                by_type[e.error_type] = by_type.get(e.error_type, 0) + 1
+
+            return {
+                "total_errors": total,
+                "resolved": resolved,
+                "unresolved": total - resolved,
+                "errors_by_tool": by_tool,
+                "errors_by_type": by_type,
+            }
+        finally:
+            session.close()
+
+    def get_error_groups(self, days: int = 30) -> List[Dict]:
+        """
+        Get error groups by error type and tool name.
+
+        Args:
+            days: Number of days to look back.
+
+        Returns:
+            List of dictionaries with error groups: {error_type, tool, count, lessons}.
+        """
+        session = self.get_session()
+        try:
+            cutoff_date = datetime.utcnow() - timedelta(days=days)
+            stmt = select(QueryError).where(QueryError.created_at >= cutoff_date)
+            errors = session.execute(stmt).scalars().all()
+
+            groups: Dict[tuple, Dict] = {}
+            for error in errors:
+                key = (error.error_type, error.tool_name)
+                if key not in groups:
+                    groups[key] = {
+                        "error_type": error.error_type,
+                        "tool": error.tool_name,
+                        "count": 0,
+                        "lessons": [],
+                    }
+                groups[key]["count"] += 1
+                if error.lesson and error.lesson not in groups[key]["lessons"]:
+                    groups[key]["lessons"].append(error.lesson)
+
+            return list(groups.values())
         finally:
             session.close()
 
@@ -825,11 +1147,985 @@ class DatabaseOperations:
         finally:
             session.close()
 
+    # ==================== Session Operations ====================
+
+    def create_session(
+        self,
+        user_id: int,
+        channel_type: str = "telegram",
+        primary_intent: Optional[str] = None,
+    ) -> Session:
+        """
+        Create a new session for a user.
+
+        Args:
+            user_id: User ID.
+            channel_type: Channel type (default "telegram").
+            primary_intent: Optional primary intent for the session.
+
+        Returns:
+            Session object.
+        """
+        session = self.get_session()
+        try:
+            new_session = Session(
+                user_id=user_id,
+                channel_type=channel_type,
+                primary_intent=primary_intent,
+                message_count=0,
+            )
+            session.add(new_session)
+            session.commit()
+            session.refresh(new_session)
+            return new_session
+        finally:
+            session.close()
+
+    def get_active_session(self, user_id: int) -> Optional[Session]:
+        """
+        Get the active (not ended) session for a user.
+
+        Args:
+            user_id: User ID.
+
+        Returns:
+            Session object or None if no active session exists.
+        """
+        session = self.get_session()
+        try:
+            stmt = (
+                select(Session)
+                .where(
+                    and_(
+                        Session.user_id == user_id,
+                        Session.ended_at.is_(None),
+                    )
+                )
+                .order_by(Session.last_message_at.desc())
+                .limit(1)
+            )
+            return session.execute(stmt).scalar_one_or_none()
+        finally:
+            session.close()
+
+    def end_session(
+        self,
+        session_id: int,
+        summary: Optional[str] = None,
+    ) -> Optional[Session]:
+        """
+        End a session.
+
+        Args:
+            session_id: Session ID.
+            summary: Optional session summary.
+
+        Returns:
+            Updated Session object or None if not found.
+        """
+        session = self.get_session()
+        try:
+            stmt = select(Session).where(Session.id == session_id)
+            sess = session.execute(stmt).scalar_one_or_none()
+
+            if sess:
+                sess.ended_at = datetime.utcnow()
+                if summary:
+                    sess.session_summary = summary
+                session.commit()
+                session.refresh(sess)
+
+            return sess
+        finally:
+            session.close()
+
+    def update_session_activity(
+        self,
+        session_id: int,
+        intent: Optional[str] = None,
+    ) -> Optional[Session]:
+        """
+        Update session activity timestamp and optionally update intent.
+
+        Args:
+            session_id: Session ID.
+            intent: Optional primary intent to update.
+
+        Returns:
+            Updated Session object or None if not found.
+        """
+        session = self.get_session()
+        try:
+            stmt = select(Session).where(Session.id == session_id)
+            sess = session.execute(stmt).scalar_one_or_none()
+
+            if sess:
+                sess.last_message_at = datetime.utcnow()
+                sess.message_count = (sess.message_count or 0) + 1
+                if intent:
+                    sess.primary_intent = intent
+                session.commit()
+                session.refresh(sess)
+
+            return sess
+        finally:
+            session.close()
+
+    def get_session_conversations(
+        self,
+        session_id: int,
+        limit: int = 50,
+    ) -> List[Conversation]:
+        """
+        Get conversations for a specific session.
+
+        Args:
+            session_id: Session ID.
+            limit: Maximum number of conversations to return.
+
+        Returns:
+            List of Conversation objects.
+        """
+        session = self.get_session()
+        try:
+            stmt = (
+                select(Conversation)
+                .where(Conversation.session_id == session_id)
+                .order_by(Conversation.created_at.asc())
+                .limit(limit)
+            )
+            return session.execute(stmt).scalars().all()
+        finally:
+            session.close()
+
+    def get_previous_session(
+        self,
+        user_id: int,
+        current_session_id: int,
+    ) -> Optional[Session]:
+        """
+        Get the most recent ended session before the current session.
+
+        Args:
+            user_id: User ID.
+            current_session_id: Current session ID to exclude.
+
+        Returns:
+            Session object or None if not found.
+        """
+        session = self.get_session()
+        try:
+            stmt = (
+                select(Session)
+                .where(
+                    and_(
+                        Session.user_id == user_id,
+                        Session.ended_at.isnot(None),
+                        Session.id != current_session_id,
+                    )
+                )
+                .order_by(Session.ended_at.desc())
+                .limit(1)
+            )
+            return session.execute(stmt).scalar_one_or_none()
+        finally:
+            session.close()
+
+    # ==================== Query Template Operations ====================
+
+    def create_template(
+        self,
+        intent_category: str,
+        intent_description: str,
+        tool_name: str,
+        tool_parameters: str,
+        created_by_user_id: Optional[int] = None,
+        example_queries: Optional[List[str]] = None,
+        avg_execution_time_ms: int = 0,
+        confidence: float = 1.0,
+    ) -> QueryTemplate:
+        """
+        Create a new query template.
+
+        Args:
+            intent_category: Intent category.
+            intent_description: Human-readable intent description.
+            tool_name: Tool name for this template.
+            tool_parameters: Tool parameters template (JSON string).
+            created_by_user_id: Optional user ID who created this template.
+            example_queries: Optional list of example queries.
+            avg_execution_time_ms: Average execution time.
+            confidence: Confidence score (0.0-1.0).
+
+        Returns:
+            QueryTemplate object.
+        """
+        session = self.get_session()
+        try:
+            template = QueryTemplate(
+                intent_category=intent_category,
+                intent_description=intent_description,
+                tool_name=tool_name,
+                tool_parameters=tool_parameters,
+                created_by_user_id=created_by_user_id,
+                example_queries=json.dumps(example_queries) if example_queries else None,
+                avg_execution_time_ms=avg_execution_time_ms,
+                confidence=confidence,
+                success_count=0,
+                failure_count=0,
+            )
+            session.add(template)
+            session.commit()
+            session.refresh(template)
+            return template
+        finally:
+            session.close()
+
+    def find_template(
+        self,
+        intent_category: str,
+        tool_name: str,
+    ) -> Optional[QueryTemplate]:
+        """
+        Find a template by intent category and tool name, ordered by confidence.
+
+        Args:
+            intent_category: Intent category.
+            tool_name: Tool name.
+
+        Returns:
+            QueryTemplate object or None if not found.
+        """
+        session = self.get_session()
+        try:
+            stmt = (
+                select(QueryTemplate)
+                .where(
+                    and_(
+                        QueryTemplate.intent_category == intent_category,
+                        QueryTemplate.tool_name == tool_name,
+                    )
+                )
+                .order_by(QueryTemplate.confidence.desc())
+                .limit(1)
+            )
+            return session.execute(stmt).scalar_one_or_none()
+        finally:
+            session.close()
+
+    def get_best_template(
+        self,
+        intent_category: str,
+        min_confidence: float = 0.7,
+    ) -> Optional[QueryTemplate]:
+        """
+        Get the best template for an intent regardless of tool.
+
+        Args:
+            intent_category: Intent category.
+            min_confidence: Minimum confidence threshold.
+
+        Returns:
+            QueryTemplate object or None if not found.
+        """
+        session = self.get_session()
+        try:
+            stmt = (
+                select(QueryTemplate)
+                .where(
+                    and_(
+                        QueryTemplate.intent_category == intent_category,
+                        QueryTemplate.confidence >= min_confidence,
+                    )
+                )
+                .order_by(QueryTemplate.confidence.desc())
+                .limit(1)
+            )
+            return session.execute(stmt).scalar_one_or_none()
+        finally:
+            session.close()
+
+    def increment_template_success(
+        self,
+        template_id: int,
+        execution_time_ms: int,
+    ) -> Optional[QueryTemplate]:
+        """
+        Increment success count and update confidence for a template.
+
+        Args:
+            template_id: Template ID.
+            execution_time_ms: Execution time in milliseconds.
+
+        Returns:
+            Updated QueryTemplate object or None if not found.
+        """
+        session = self.get_session()
+        try:
+            stmt = select(QueryTemplate).where(QueryTemplate.id == template_id)
+            template = session.execute(stmt).scalar_one_or_none()
+
+            if template:
+                template.success_count = (template.success_count or 0) + 1
+                total = (template.success_count or 0) + (template.failure_count or 0)
+                template.confidence = (
+                    (template.success_count or 0) / total if total > 0 else 0.5
+                )
+                # Update average execution time
+                if template.avg_execution_time_ms:
+                    template.avg_execution_time_ms = (
+                        (template.avg_execution_time_ms + execution_time_ms) / 2
+                    )
+                else:
+                    template.avg_execution_time_ms = execution_time_ms
+                template.last_used_at = datetime.utcnow()
+                session.commit()
+                session.refresh(template)
+
+            return template
+        finally:
+            session.close()
+
+    def increment_template_failure(
+        self,
+        template_id: int,
+    ) -> Optional[QueryTemplate]:
+        """
+        Increment failure count and update confidence for a template.
+
+        Args:
+            template_id: Template ID.
+
+        Returns:
+            Updated QueryTemplate object or None if not found.
+        """
+        session = self.get_session()
+        try:
+            stmt = select(QueryTemplate).where(QueryTemplate.id == template_id)
+            template = session.execute(stmt).scalar_one_or_none()
+
+            if template:
+                template.failure_count = (template.failure_count or 0) + 1
+                total = (template.success_count or 0) + (template.failure_count or 0)
+                template.confidence = (
+                    (template.success_count or 0) / total if total > 0 else 0.5
+                )
+                session.commit()
+                session.refresh(template)
+
+            return template
+        finally:
+            session.close()
+
+    def get_templates_by_intent(
+        self,
+        intent_category: str,
+        min_confidence: float = 0.7,
+        limit: int = 5,
+    ) -> List[QueryTemplate]:
+        """
+        Get templates for an intent category above a confidence threshold.
+
+        Args:
+            intent_category: Intent category.
+            min_confidence: Minimum confidence threshold.
+            limit: Maximum number of templates to return.
+
+        Returns:
+            List of QueryTemplate objects sorted by confidence descending.
+        """
+        session = self.get_session()
+        try:
+            stmt = (
+                select(QueryTemplate)
+                .where(
+                    and_(
+                        QueryTemplate.intent_category == intent_category,
+                        QueryTemplate.confidence >= min_confidence,
+                    )
+                )
+                .order_by(QueryTemplate.confidence.desc())
+                .limit(limit)
+            )
+            return session.execute(stmt).scalars().all()
+        finally:
+            session.close()
+
+    def add_template_example(
+        self,
+        template_id: int,
+        example_query: str,
+    ) -> Optional[QueryTemplate]:
+        """
+        Add an example query to a template's example_queries JSON array.
+
+        Args:
+            template_id: Template ID.
+            example_query: Example query string to add.
+
+        Returns:
+            Updated QueryTemplate object or None if not found.
+        """
+        session = self.get_session()
+        try:
+            stmt = select(QueryTemplate).where(QueryTemplate.id == template_id)
+            template = session.execute(stmt).scalar_one_or_none()
+
+            if template:
+                examples = []
+                if template.example_queries:
+                    examples = json.loads(template.example_queries)
+                if example_query not in examples:
+                    examples.append(example_query)
+                template.example_queries = json.dumps(examples)
+                session.commit()
+                session.refresh(template)
+
+            return template
+        finally:
+            session.close()
+
+    # ==================== Error Recovery Pattern Operations ====================
+
+    def create_recovery_pattern(
+        self,
+        error_type: str,
+        failed_tool_name: str,
+        failed_parameters: str,
+        error_fingerprint: str,
+        recovery_tool_name: str,
+        recovery_parameters: str,
+        recovery_description: str,
+    ) -> ErrorRecoveryPattern:
+        """
+        Create a new error recovery pattern.
+
+        Args:
+            error_type: Type of error.
+            failed_tool_name: Tool name that failed.
+            failed_parameters: Parameters of the failed tool call.
+            error_fingerprint: Unique fingerprint of the error.
+            recovery_tool_name: Tool name to recover with.
+            recovery_parameters: Parameters for recovery tool.
+            recovery_description: Description of the recovery.
+
+        Returns:
+            ErrorRecoveryPattern object.
+        """
+        session = self.get_session()
+        try:
+            pattern = ErrorRecoveryPattern(
+                error_type=error_type,
+                failed_tool_name=failed_tool_name,
+                failed_parameters=failed_parameters,
+                error_fingerprint=error_fingerprint,
+                recovery_tool_name=recovery_tool_name,
+                recovery_parameters=recovery_parameters,
+                recovery_description=recovery_description,
+                times_applied=0,
+                times_succeeded=0,
+                confidence=0.5,
+            )
+            session.add(pattern)
+            session.commit()
+            session.refresh(pattern)
+            return pattern
+        finally:
+            session.close()
+
+    def find_recovery_pattern(
+        self,
+        error_fingerprint: str,
+    ) -> Optional[ErrorRecoveryPattern]:
+        """
+        Find a recovery pattern by error fingerprint.
+
+        Args:
+            error_fingerprint: Error fingerprint.
+
+        Returns:
+            ErrorRecoveryPattern object or None if not found.
+        """
+        session = self.get_session()
+        try:
+            stmt = select(ErrorRecoveryPattern).where(
+                ErrorRecoveryPattern.error_fingerprint == error_fingerprint
+            )
+            return session.execute(stmt).scalar_one_or_none()
+        finally:
+            session.close()
+
+    def find_recovery_by_type(
+        self,
+        error_type: str,
+        tool_name: str,
+    ) -> Optional[ErrorRecoveryPattern]:
+        """
+        Find the highest confidence recovery pattern for an error type and tool.
+
+        Args:
+            error_type: Error type.
+            tool_name: Tool name that failed.
+
+        Returns:
+            ErrorRecoveryPattern object or None if not found.
+        """
+        session = self.get_session()
+        try:
+            stmt = (
+                select(ErrorRecoveryPattern)
+                .where(
+                    and_(
+                        ErrorRecoveryPattern.error_type == error_type,
+                        ErrorRecoveryPattern.failed_tool_name == tool_name,
+                    )
+                )
+                .order_by(ErrorRecoveryPattern.confidence.desc())
+                .limit(1)
+            )
+            return session.execute(stmt).scalar_one_or_none()
+        finally:
+            session.close()
+
+    def increment_recovery_success(
+        self,
+        pattern_id: int,
+    ) -> Optional[ErrorRecoveryPattern]:
+        """
+        Increment success counts and update confidence for a recovery pattern.
+
+        Args:
+            pattern_id: Pattern ID.
+
+        Returns:
+            Updated ErrorRecoveryPattern object or None if not found.
+        """
+        session = self.get_session()
+        try:
+            stmt = select(ErrorRecoveryPattern).where(ErrorRecoveryPattern.id == pattern_id)
+            pattern = session.execute(stmt).scalar_one_or_none()
+
+            if pattern:
+                pattern.times_applied = (pattern.times_applied or 0) + 1
+                pattern.times_succeeded = (pattern.times_succeeded or 0) + 1
+                total = pattern.times_applied or 1
+                pattern.confidence = (pattern.times_succeeded or 0) / total
+                pattern.last_used_at = datetime.utcnow()
+                session.commit()
+                session.refresh(pattern)
+
+            return pattern
+        finally:
+            session.close()
+
+    def increment_recovery_applied(
+        self,
+        pattern_id: int,
+    ) -> Optional[ErrorRecoveryPattern]:
+        """
+        Increment applied count and update confidence for a recovery pattern (without success).
+
+        Args:
+            pattern_id: Pattern ID.
+
+        Returns:
+            Updated ErrorRecoveryPattern object or None if not found.
+        """
+        session = self.get_session()
+        try:
+            stmt = select(ErrorRecoveryPattern).where(ErrorRecoveryPattern.id == pattern_id)
+            pattern = session.execute(stmt).scalar_one_or_none()
+
+            if pattern:
+                pattern.times_applied = (pattern.times_applied or 0) + 1
+                total = pattern.times_applied or 1
+                pattern.confidence = (pattern.times_succeeded or 0) / total
+                session.commit()
+                session.refresh(pattern)
+
+            return pattern
+        finally:
+            session.close()
+
+    def get_top_recovery_patterns(
+        self,
+        min_confidence: float = 0.8,
+        min_times_applied: int = 2,
+        limit: int = 5,
+    ) -> List[ErrorRecoveryPattern]:
+        """
+        Get top recovery patterns above confidence threshold and application count.
+
+        Args:
+            min_confidence: Minimum confidence threshold.
+            min_times_applied: Minimum number of times applied.
+            limit: Maximum number of patterns to return.
+
+        Returns:
+            List of ErrorRecoveryPattern objects sorted by confidence descending.
+        """
+        session = self.get_session()
+        try:
+            stmt = (
+                select(ErrorRecoveryPattern)
+                .where(
+                    and_(
+                        ErrorRecoveryPattern.confidence >= min_confidence,
+                        ErrorRecoveryPattern.times_applied >= min_times_applied,
+                    )
+                )
+                .order_by(ErrorRecoveryPattern.confidence.desc())
+                .limit(limit)
+            )
+            return session.execute(stmt).scalars().all()
+        finally:
+            session.close()
+
+    # ==================== Global Insight Operations ====================
+
+    def upsert_global_insight(
+        self,
+        insight_type: str,
+        insight_key: str,
+        insight_value: str,
+        sample_size: int = 1,
+        confidence: float = 0.5,
+    ) -> GlobalInsight:
+        """
+        Create or update a global insight (upsert).
+
+        Args:
+            insight_type: Type of insight.
+            insight_key: Key for the insight.
+            insight_value: Value of the insight.
+            sample_size: Number of samples this insight is based on.
+            confidence: Confidence score.
+
+        Returns:
+            GlobalInsight object.
+        """
+        session = self.get_session()
+        try:
+            stmt = select(GlobalInsight).where(
+                and_(
+                    GlobalInsight.insight_type == insight_type,
+                    GlobalInsight.insight_key == insight_key,
+                )
+            )
+            insight = session.execute(stmt).scalar_one_or_none()
+
+            if insight is None:
+                insight = GlobalInsight(
+                    insight_type=insight_type,
+                    insight_key=insight_key,
+                    insight_value=insight_value,
+                    sample_size=sample_size,
+                    confidence=confidence,
+                )
+            else:
+                insight.insight_value = insight_value
+                insight.sample_size = (insight.sample_size or 0) + sample_size
+                insight.confidence = confidence
+                insight.updated_at = datetime.utcnow()
+
+            session.add(insight)
+            session.commit()
+            session.refresh(insight)
+            return insight
+        finally:
+            session.close()
+
+    def get_global_insight(
+        self,
+        insight_type: str,
+        insight_key: str,
+    ) -> Optional[GlobalInsight]:
+        """
+        Get a specific global insight.
+
+        Args:
+            insight_type: Type of insight.
+            insight_key: Key for the insight.
+
+        Returns:
+            GlobalInsight object or None if not found.
+        """
+        session = self.get_session()
+        try:
+            stmt = select(GlobalInsight).where(
+                and_(
+                    GlobalInsight.insight_type == insight_type,
+                    GlobalInsight.insight_key == insight_key,
+                )
+            )
+            return session.execute(stmt).scalar_one_or_none()
+        finally:
+            session.close()
+
+    def get_global_insights_by_type(
+        self,
+        insight_type: str,
+        limit: int = 10,
+    ) -> List[GlobalInsight]:
+        """
+        Get all global insights of a specific type.
+
+        Args:
+            insight_type: Type of insight.
+            limit: Maximum number of insights to return.
+
+        Returns:
+            List of GlobalInsight objects.
+        """
+        session = self.get_session()
+        try:
+            stmt = (
+                select(GlobalInsight)
+                .where(GlobalInsight.insight_type == insight_type)
+                .order_by(GlobalInsight.updated_at.desc())
+                .limit(limit)
+            )
+            return session.execute(stmt).scalars().all()
+        finally:
+            session.close()
+
+    def delete_stale_insights(self, max_age_days: int = 90) -> int:
+        """
+        Delete global insights older than max_age_days.
+
+        Args:
+            max_age_days: Maximum age in days.
+
+        Returns:
+            Number of deleted insights.
+        """
+        session = self.get_session()
+        try:
+            cutoff_date = datetime.utcnow() - timedelta(days=max_age_days)
+            stmt = select(GlobalInsight).where(GlobalInsight.updated_at < cutoff_date)
+            stale = session.execute(stmt).scalars().all()
+
+            for insight in stale:
+                session.delete(insight)
+
+            session.commit()
+            return len(stale)
+        finally:
+            session.close()
+
+    # ==================== Response Feedback Operations ====================
+
+    def save_response_feedback(
+        self,
+        conversation_id: int,
+        user_id: int,
+        feedback_type: str,
+        quality_score: float,
+        query_type: Optional[str] = None,
+        tool_used: Optional[str] = None,
+        signal_text: Optional[str] = None,
+    ) -> ResponseFeedback:
+        """
+        Save response feedback from a user.
+
+        Args:
+            conversation_id: Conversation ID.
+            user_id: User ID.
+            feedback_type: Type of feedback (e.g., "like", "dislike", "corrected").
+            quality_score: Quality score (0.0-1.0).
+            query_type: Optional query type.
+            tool_used: Optional tool that was used.
+            signal_text: Optional text signal from user.
+
+        Returns:
+            ResponseFeedback object.
+        """
+        session = self.get_session()
+        try:
+            feedback = ResponseFeedback(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                feedback_type=feedback_type,
+                quality_score=quality_score,
+                query_type=query_type,
+                tool_used=tool_used,
+                signal_text=signal_text,
+            )
+            session.add(feedback)
+            session.commit()
+            session.refresh(feedback)
+            return feedback
+        finally:
+            session.close()
+
+    def get_avg_quality_score(self, user_id: int, days: int = 30) -> float:
+        """
+        Get average quality score for a user's responses.
+
+        Args:
+            user_id: User ID.
+            days: Number of days to look back.
+
+        Returns:
+            Average quality score (0.0-1.0).
+        """
+        session = self.get_session()
+        try:
+            cutoff_date = datetime.utcnow() - timedelta(days=days)
+            stmt = (
+                select(func.avg(ResponseFeedback.quality_score))
+                .where(
+                    and_(
+                        ResponseFeedback.user_id == user_id,
+                        ResponseFeedback.created_at >= cutoff_date,
+                    )
+                )
+            )
+            result = session.execute(stmt).scalar()
+            return float(result) if result else 0.0
+        finally:
+            session.close()
+
+    def update_conversation_quality(
+        self,
+        conversation_id: int,
+        quality_score: float,
+    ) -> Optional[Conversation]:
+        """
+        Update quality score on a conversation.
+
+        Args:
+            conversation_id: Conversation ID.
+            quality_score: Quality score to set.
+
+        Returns:
+            Updated Conversation object or None if not found.
+        """
+        session = self.get_session()
+        try:
+            stmt = select(Conversation).where(Conversation.id == conversation_id)
+            conversation = session.execute(stmt).scalar_one_or_none()
+
+            if conversation:
+                conversation.response_quality_score = quality_score
+                session.commit()
+                session.refresh(conversation)
+
+            return conversation
+        finally:
+            session.close()
+
+    # ==================== Channel Session Operations ====================
+
+    def get_or_create_channel_session(
+        self,
+        user_id: int,
+        channel_type: str,
+        channel_user_id: str,
+        channel_username: Optional[str] = None,
+        channel_metadata: Optional[str] = None,
+    ) -> ChannelSession:
+        """
+        Get or create a channel session for a user.
+
+        Args:
+            user_id: User ID.
+            channel_type: Type of channel (e.g., "telegram").
+            channel_user_id: User ID on the channel.
+            channel_username: Optional username on the channel.
+            channel_metadata: Optional metadata JSON string.
+
+        Returns:
+            ChannelSession object.
+        """
+        session = self.get_session()
+        try:
+            stmt = select(ChannelSession).where(
+                and_(
+                    ChannelSession.user_id == user_id,
+                    ChannelSession.channel_type == channel_type,
+                )
+            )
+            ch_session = session.execute(stmt).scalar_one_or_none()
+
+            if ch_session is None:
+                ch_session = ChannelSession(
+                    user_id=user_id,
+                    channel_type=channel_type,
+                    channel_user_id=channel_user_id,
+                    channel_username=channel_username,
+                    channel_metadata=channel_metadata,
+                )
+                session.add(ch_session)
+                session.commit()
+                session.refresh(ch_session)
+
+            return ch_session
+        finally:
+            session.close()
+
+    def get_user_by_channel(
+        self,
+        channel_type: str,
+        channel_user_id: str,
+    ) -> Optional[User]:
+        """
+        Get a user by their channel ID and channel type.
+
+        Args:
+            channel_type: Type of channel.
+            channel_user_id: User ID on the channel.
+
+        Returns:
+            User object or None if not found.
+        """
+        session = self.get_session()
+        try:
+            stmt = select(ChannelSession).where(
+                and_(
+                    ChannelSession.channel_type == channel_type,
+                    ChannelSession.channel_user_id == channel_user_id,
+                )
+            )
+            ch_session = session.execute(stmt).scalar_one_or_none()
+
+            if ch_session is None:
+                return None
+
+            user_stmt = select(User).where(User.id == ch_session.user_id)
+            return session.execute(user_stmt).scalar_one_or_none()
+        finally:
+            session.close()
+
+    def update_channel_activity(self, channel_session_id: int) -> Optional[ChannelSession]:
+        """
+        Update the last_active timestamp for a channel session.
+
+        Args:
+            channel_session_id: Channel session ID.
+
+        Returns:
+            Updated ChannelSession object or None if not found.
+        """
+        session = self.get_session()
+        try:
+            stmt = select(ChannelSession).where(ChannelSession.id == channel_session_id)
+            ch_session = session.execute(stmt).scalar_one_or_none()
+
+            if ch_session:
+                ch_session.last_active = datetime.utcnow()
+                session.commit()
+                session.refresh(ch_session)
+
+            return ch_session
+        finally:
+            session.close()
+
     # ==================== Data Cleanup Operations ====================
 
     def clear_user_data(self, user_id: int) -> Dict[str, int]:
         """
-        Clear all data for a user (conversations, patterns, preferences, etc.).
+        Clear all data for a user (conversations, patterns, preferences, sessions, etc.).
 
         Args:
             user_id: User ID.
@@ -865,13 +2161,45 @@ class DatabaseOperations:
             for pref in preferences:
                 session.delete(pref)
 
-            # Delete MCP tool usage
+            # Delete tool usage
             tool_usage = session.execute(
-                select(MCPToolUsage).where(MCPToolUsage.user_id == user_id)
+                select(ToolUsage).where(ToolUsage.user_id == user_id)
             ).scalars().all()
             counts["tool_usage"] = len(tool_usage)
             for usage in tool_usage:
                 session.delete(usage)
+
+            # Delete query errors
+            query_errors = session.execute(
+                select(QueryError).where(QueryError.user_id == user_id)
+            ).scalars().all()
+            counts["query_errors"] = len(query_errors)
+            for qe in query_errors:
+                session.delete(qe)
+
+            # Delete sessions
+            sessions = session.execute(
+                select(Session).where(Session.user_id == user_id)
+            ).scalars().all()
+            counts["sessions"] = len(sessions)
+            for sess in sessions:
+                session.delete(sess)
+
+            # Delete channel sessions
+            channel_sessions = session.execute(
+                select(ChannelSession).where(ChannelSession.user_id == user_id)
+            ).scalars().all()
+            counts["channel_sessions"] = len(channel_sessions)
+            for ch_sess in channel_sessions:
+                session.delete(ch_sess)
+
+            # Delete response feedback
+            feedback = session.execute(
+                select(ResponseFeedback).where(ResponseFeedback.user_id == user_id)
+            ).scalars().all()
+            counts["response_feedback"] = len(feedback)
+            for fb in feedback:
+                session.delete(fb)
 
             # Delete stores (which cascades to cache)
             stores = session.execute(

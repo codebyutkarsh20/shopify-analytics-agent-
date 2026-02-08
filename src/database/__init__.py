@@ -7,7 +7,6 @@ from src.database.models import (
     Conversation,
     QueryPattern,
     UserPreference,
-    MCPToolUsage,
     AnalyticsCache,
 )
 from src.database.operations import DatabaseOperations
@@ -25,7 +24,6 @@ __all__ = [
     "Conversation",
     "QueryPattern",
     "UserPreference",
-    "MCPToolUsage",
     "AnalyticsCache",
     "DatabaseOperations",
     "init_database",
