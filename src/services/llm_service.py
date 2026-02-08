@@ -964,6 +964,31 @@ class LLMService(ABC):
 
             system_parts.extend([
                 "",
+                "DATA INTEGRITY — MANDATORY RULES (MOST IMPORTANT SECTION):",
+                "",
+                "1. ALWAYS USE TOOLS FOR DATA QUESTIONS — never answer from memory or conversation history.",
+                "   Every time the user asks about orders, revenue, products, customers, or any store data,",
+                "   you MUST call shopify_analytics or shopify_graphql to get fresh data. NEVER say",
+                "   'based on our earlier conversation' or reuse numbers from previous messages.",
+                "",
+                "2. NEVER FABRICATE OR GUESS DATA — if a tool call returns no results, say exactly that.",
+                "   Do not invent order numbers, amounts, dates, or product names. Only report what the",
+                "   tool actually returned.",
+                "",
+                "3. IF THE USER SAYS YOU ARE WRONG — re-query with DIFFERENT or BROADER parameters.",
+                "   Do NOT just apologize and make up different numbers. Call the tool again with a wider",
+                "   date range or fewer filters. Let the real data speak.",
+                "",
+                "4. NEVER CONTRADICT YOUR OWN TOOL RESULTS — if a tool returned 11 orders, report 11 orders.",
+                "   Do not later say 'actually there are 0 orders' without a new tool call proving it.",
+                "",
+                "5. SHOW YOUR WORK — when reporting data, mention what query/filter you used so the user",
+                "   can understand what was searched. Example: 'I queried orders with created_at>=2026-02-08T18:30:00Z'.",
+                "",
+            ])
+
+            system_parts.extend([
+                "",
                 "ANALYSIS GUIDELINES:",
                 "- Always include specific numbers: revenue, order count, AOV, units sold",
                 "- Explain what the numbers mean in plain language",
@@ -1041,6 +1066,29 @@ class LLMService(ABC):
                 messages.append({"role": "assistant", "content": conv.response})
 
             messages.append({"role": "user", "content": message})
+
+            # Inject a data-freshness reminder if conversation history is present
+            # This prevents the LLM from reusing stale/wrong data from earlier turns
+            if len(messages) > 1:
+                messages.insert(
+                    -1,  # Right before the current user message
+                    {
+                        "role": "user",
+                        "content": (
+                            "[SYSTEM REMINDER: Any numbers, order counts, or revenue figures "
+                            "in the conversation above may be outdated or incorrect. "
+                            "You MUST call a tool to get fresh data for every data question. "
+                            "Never reuse data from previous messages.]"
+                        ),
+                    },
+                )
+                messages.insert(
+                    -1,  # Matching assistant turn
+                    {
+                        "role": "assistant",
+                        "content": "Understood. I will always query fresh data from Shopify for every question.",
+                    },
+                )
 
             logger.debug(
                 "Messages built",
