@@ -6,6 +6,7 @@ tool formatting, and response parsing are delegated to subclasses.
 """
 
 import json
+import re
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -20,7 +21,7 @@ from src.learning.recovery_manager import RecoveryManager
 from src.services.chart_generator import ChartGenerator
 from src.services.shopify_graphql import ShopifyGraphQLClient
 from src.utils.logger import get_logger
-from src.utils.timezone import now_ist
+from src.utils.timezone import now_ist, IST
 
 logger = get_logger(__name__)
 
@@ -437,9 +438,12 @@ class LLMService(ABC):
                     "query": {
                         "type": "string",
                         "description": (
-                            "Shopify search/filter string. Examples: "
-                            "'status:active', 'created_at:>2024-01-01', "
-                            "'tag:sale', 'financial_status:paid'"
+                            "Shopify search/filter string. IMPORTANT: Date filters MUST use UTC "
+                            "timestamps (NOT IST dates). Use the pre-computed UTC boundaries from "
+                            "the system prompt for 'today', 'yesterday', etc. "
+                            "Examples: 'financial_status:paid', 'status:active', "
+                            "'created_at:>=2026-02-08T18:30:00Z' (today in IST as UTC), "
+                            "'tag:sale'. Multiple filters can be combined with spaces."
                         ),
                     },
                     "after": {
@@ -605,13 +609,57 @@ class LLMService(ABC):
 
             raise ValueError(f"Tool execution failed: {tool_name} - {str(e)}")
 
+    @staticmethod
+    def _normalize_date_filters(query_str: str) -> str:
+        """Normalize date filters in Shopify query strings from IST to UTC.
+
+        Safety net: if the LLM generates date-only filters like
+        'created_at:>2026-02-09' (which Shopify treats as UTC midnight),
+        this converts them to the correct UTC boundary for IST midnight.
+
+        IST = UTC + 5:30, so IST midnight = previous day 18:30 UTC.
+        """
+        if not query_str:
+            return query_str
+
+        import pytz
+        from datetime import datetime as _dt
+
+        # Pattern: created_at or updated_at with a bare date (no time component)
+        # Matches: created_at:>2026-02-09, created_at:>=2026-02-09, created_at:<2026-02-09
+        bare_date_re = re.compile(
+            r'((?:created_at|updated_at)\s*:\s*(?:>=?|<=?))\s*(\d{4}-\d{2}-\d{2})(?!T)'
+        )
+
+        def _convert_match(m):
+            operator = m.group(1)
+            date_str = m.group(2)
+            try:
+                # Parse the bare date as IST midnight
+                naive_dt = _dt.strptime(date_str, "%Y-%m-%d")
+                ist_midnight = IST.localize(naive_dt)
+                utc_equivalent = ist_midnight.astimezone(pytz.UTC)
+                utc_str = utc_equivalent.strftime("%Y-%m-%dT%H:%M:%SZ")
+                logger.info(
+                    "Date filter normalized IST→UTC",
+                    original=f"{operator}{date_str}",
+                    normalized=f"{operator}{utc_str}",
+                )
+                return f"{operator}{utc_str}"
+            except (ValueError, Exception) as e:
+                logger.warning("Failed to normalize date filter", error=str(e))
+                return m.group(0)
+
+        normalized = bare_date_re.sub(_convert_match, query_str)
+        return normalized
+
     async def _execute_analytics_tool(self, tool_input: Dict[str, Any]) -> str:
         """Execute the shopify_analytics tool."""
         resource = tool_input.get("resource", "products")
         sort_key = tool_input.get("sort_key", "CREATED_AT")
         reverse = tool_input.get("reverse", True)
         limit = tool_input.get("limit", 10)
-        query = tool_input.get("query")
+        query = self._normalize_date_filters(tool_input.get("query"))
         after = tool_input.get("after")
 
         logger.info(
@@ -726,10 +774,42 @@ class LLMService(ABC):
     def _build_system_prompt(self, user_id: int) -> str:
         """Build the system prompt with context, tool guidance, and formatting rules."""
         try:
+            # Pre-compute UTC date boundaries so the LLM doesn't need timezone math
+            from datetime import timedelta
+            import pytz
+
+            now_ist_dt = now_ist()
+            now_ist_aware = IST.localize(now_ist_dt) if now_ist_dt.tzinfo is None else now_ist_dt
+            now_utc = now_ist_aware.astimezone(pytz.UTC)
+
+            # IST day boundaries in UTC (for Shopify API filtering)
+            today_start_ist = now_ist_aware.replace(hour=0, minute=0, second=0, microsecond=0)
+            today_start_utc = today_start_ist.astimezone(pytz.UTC)
+
+            yesterday_start_ist = today_start_ist - timedelta(days=1)
+            yesterday_start_utc = yesterday_start_ist.astimezone(pytz.UTC)
+            yesterday_end_utc = today_start_utc  # yesterday ends where today starts
+
+            week_ago_ist = today_start_ist - timedelta(days=7)
+            week_ago_utc = week_ago_ist.astimezone(pytz.UTC)
+
+            month_ago_ist = today_start_ist - timedelta(days=30)
+            month_ago_utc = month_ago_ist.astimezone(pytz.UTC)
+
+            # Format UTC timestamps for Shopify query filters
+            utc_fmt = "%Y-%m-%dT%H:%M:%SZ"
+            today_start_utc_str = today_start_utc.strftime(utc_fmt)
+            yesterday_start_utc_str = yesterday_start_utc.strftime(utc_fmt)
+            yesterday_end_utc_str = yesterday_end_utc.strftime(utc_fmt)
+            week_ago_utc_str = week_ago_utc.strftime(utc_fmt)
+            month_ago_utc_str = month_ago_utc.strftime(utc_fmt)
+            now_utc_str = now_utc.strftime(utc_fmt)
+
             system_parts = [
                 "You are a Shopify Analytics Assistant. Your role is to help merchants analyze their store data, understand sales trends, and make data-driven decisions.",
                 "",
-                f"Current date and time (IST, Indian Standard Time, UTC+5:30): {now_ist().isoformat()}",
+                f"Current date and time (IST, Indian Standard Time, UTC+5:30): {now_ist_aware.isoformat()}",
+                f"Current date and time (UTC, for Shopify API queries): {now_utc_str}",
                 f"Store domain: {self.settings.shopify.shop_domain}",
                 "",
                 "IMPORTANT — TIMEZONE HANDLING:",
@@ -737,6 +817,21 @@ class LLMService(ABC):
                 "- Do NOT convert or adjust any timestamps — display them exactly as received.",
                 "- When showing a timestamp like '2026-02-09T00:15:00+05:30', display it as 'Feb 9, 2026 at 12:15 AM IST'.",
                 "- Always append 'IST' when showing times to the user.",
+                "",
+                "CRITICAL — DATE FILTERING IN SHOPIFY QUERIES (READ CAREFULLY):",
+                "Shopify's API uses UTC internally. IST is UTC+5:30, so date boundaries differ!",
+                "You MUST use the pre-computed UTC boundaries below when filtering by date.",
+                "NEVER use IST dates directly in query filters — always use these UTC values:",
+                "",
+                f"  'Today' (IST)       → created_at:>={today_start_utc_str}",
+                f"  'Yesterday' (IST)   → created_at:>={yesterday_start_utc_str} created_at:<{yesterday_end_utc_str}",
+                f"  'Last 7 days' (IST) → created_at:>={week_ago_utc_str}",
+                f"  'Last 30 days'(IST) → created_at:>={month_ago_utc_str}",
+                "",
+                "Example: If a user asks 'what are today's orders?', use:",
+                f"  query: 'created_at:>={today_start_utc_str}'",
+                "Do NOT use 'created_at:>2026-02-09' — this would use UTC midnight and miss",
+                "orders placed between 12:00 AM and 5:30 AM IST.",
             ]
 
             # Context from context builder
@@ -793,7 +888,8 @@ class LLMService(ABC):
                     "   - Sort products by: TITLE, PRICE, BEST_SELLING, CREATED_AT, INVENTORY_TOTAL",
                     "   - Sort orders by: CREATED_AT, TOTAL_PRICE, ORDER_NUMBER",
                     "   - Sort customers by: NAME, TOTAL_SPENT, ORDERS_COUNT, LAST_ORDER_DATE",
-                    "   - Filter with Shopify queries: 'status:active', 'created_at:>2024-01-01', 'financial_status:paid'",
+                    "   - Filter with Shopify queries: 'status:active', 'financial_status:paid'",
+                    "   - Date filters MUST use the pre-computed UTC boundaries above (e.g., created_at:>=YYYY-MM-DDTHH:MM:SSZ)",
                     "   - Supports cursor-based pagination for large datasets",
                     "",
                     "2. shopify_graphql — Custom GraphQL queries against Shopify Admin API",
