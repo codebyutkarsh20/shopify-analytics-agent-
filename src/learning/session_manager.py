@@ -91,7 +91,8 @@ class SessionManager:
 
         # Step 2: Compute time gap
         now = datetime.utcnow()
-        time_gap = (now - active_session.last_message_at).total_seconds()
+        last_msg = active_session.last_message_at or active_session.started_at
+        time_gap = (now - last_msg).total_seconds()
 
         # Step 3: Get previous intent
         previous_intent = active_session.primary_intent
@@ -305,7 +306,10 @@ class SessionManager:
         current_count = len(current_convs)
 
         # Get previous session
-        previous_session = self.db_ops.get_previous_session(user_id=user_id)
+        previous_session = self.db_ops.get_previous_session(
+            user_id=user_id,
+            current_session_id=current_session_id,
+        )
         previous_summary = None
 
         if previous_session:

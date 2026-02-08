@@ -23,7 +23,7 @@ from telegram.ext import (
 from src.config.settings import settings
 from src.database.init_db import init_database
 from src.database.operations import DatabaseOperations
-from src.services.claude_service import ClaudeService
+from src.services.llm_factory import create_llm_service
 from src.services.shopify_graphql import ShopifyGraphQLClient
 from src.learning.pattern_learner import PatternLearner
 from src.learning.context_builder import ContextBuilder
@@ -107,8 +107,8 @@ class ShopifyAnalyticsBot:
         telegram_adapter = TelegramAdapter()
         logger.info("Telegram adapter initialized")
 
-        # Initialize Claude service with template and recovery learning
-        claude_service = ClaudeService(
+        # Initialize LLM service (Anthropic or OpenAI based on LLM_PROVIDER env var)
+        llm_service = create_llm_service(
             settings=settings,
             db_ops=db_ops,
             context_builder=context_builder,
@@ -123,7 +123,7 @@ class ShopifyAnalyticsBot:
             preference_manager=preference_manager,
         )
         message_handler = MessageHandler(
-            claude_service=claude_service,
+            claude_service=llm_service,
             pattern_learner=pattern_learner,
             preference_manager=preference_manager,
             db_ops=db_ops,

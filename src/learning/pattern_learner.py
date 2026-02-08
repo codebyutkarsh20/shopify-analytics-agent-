@@ -3,10 +3,9 @@
 Learns from user queries to understand their analysis patterns and preferences.
 """
 
-import re
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 from src.utils.logger import get_logger
 
@@ -158,7 +157,7 @@ class PatternLearner:
 
         return "general"
 
-    def extract_metrics(self, query: str) -> list[str]:
+    def extract_metrics(self, query: str) -> List[str]:
         """Extract metric keywords from the query.
 
         Args:

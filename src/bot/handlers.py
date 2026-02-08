@@ -291,6 +291,7 @@ class MessageHandler:
                 # Save feedback to database
                 self.db_ops.save_response_feedback(
                     conversation_id=latest_conv.id,
+                    user_id=user_id,
                     feedback_type=feedback["feedback_type"],
                     quality_score=feedback["quality_score"],
                     signal_text=feedback.get("signal_text"),

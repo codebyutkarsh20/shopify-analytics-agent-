@@ -150,10 +150,14 @@ class TemplateManager:
                 template_id=template.id,
                 confidence=template.confidence,
             )
+            try:
+                parameters = json.loads(template.tool_parameters) if template.tool_parameters else {}
+            except (json.JSONDecodeError, TypeError):
+                parameters = {}
             return {
                 "template_id": template.id,
                 "tool_name": template.tool_name,
-                "parameters": json.loads(template.tool_parameters),
+                "parameters": parameters,
                 "confidence": template.confidence,
                 "description": template.intent_description,
             }
@@ -178,47 +182,43 @@ class TemplateManager:
             template_id: Template to update
             quality_score: Quality score (-1.0 to 1.0)
         """
-        # Get current template
-        template = self.db_ops.get_session().query(
-            self.db_ops.SessionLocal.__self__
-        ).filter_by(id=template_id).first()
+        from sqlalchemy import select
+        from src.database.models import QueryTemplate
 
-        if not template:
-            logger.warning(
-                "Template not found for quality update",
-                template_id=template_id,
-            )
-            return
-
-        old_confidence = template.confidence
-
-        if quality_score > 0:
-            # Slight boost: confidence += quality_score * 0.02, capped at 1.0
-            delta = quality_score * 0.02
-            new_confidence = min(old_confidence + delta, 1.0)
-        else:
-            # Slight penalty: confidence += quality_score * 0.05, floored at 0.1
-            delta = quality_score * 0.05
-            new_confidence = max(old_confidence + delta, 0.1)
-
-        logger.debug(
-            "Updated template confidence",
-            template_id=template_id,
-            old_confidence=old_confidence,
-            new_confidence=new_confidence,
-            quality_score=quality_score,
-        )
-
-        # Update via direct query (using session)
         session = self.db_ops.get_session()
         try:
-            from src.database.models import QueryTemplate
-            stmt = (
-                self.db_ops.SessionLocal.query(QueryTemplate)
-                .filter(QueryTemplate.id == template_id)
-                .update({"confidence": new_confidence})
-            )
+            # Get current template
+            stmt = select(QueryTemplate).where(QueryTemplate.id == template_id)
+            template = session.execute(stmt).scalar_one_or_none()
+
+            if not template:
+                logger.warning(
+                    "Template not found for quality update",
+                    template_id=template_id,
+                )
+                return
+
+            old_confidence = template.confidence or 0.5
+
+            if quality_score > 0:
+                # Slight boost: confidence += quality_score * 0.02, capped at 1.0
+                delta = quality_score * 0.02
+                new_confidence = min(old_confidence + delta, 1.0)
+            else:
+                # Slight penalty: confidence += quality_score * 0.05, floored at 0.1
+                delta = quality_score * 0.05
+                new_confidence = max(old_confidence + delta, 0.1)
+
+            template.confidence = new_confidence
             session.commit()
+
+            logger.debug(
+                "Updated template confidence",
+                template_id=template_id,
+                old_confidence=old_confidence,
+                new_confidence=new_confidence,
+                quality_score=quality_score,
+            )
         except Exception as e:
             logger.error(
                 "Failed to update template confidence",

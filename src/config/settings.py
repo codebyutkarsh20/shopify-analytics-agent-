@@ -33,6 +33,20 @@ class AnthropicConfig:
 
 
 @dataclass
+class OpenAIConfig:
+    api_key: str = ""
+    model: str = "gpt-4o-mini"
+    max_tokens: int = 4000
+
+    def __post_init__(self):
+        self.api_key = os.getenv("OPENAI_API_KEY", self.api_key)
+        self.model = os.getenv("OPENAI_MODEL", self.model)
+        max_tokens_str = os.getenv("OPENAI_MAX_TOKENS", "")
+        if max_tokens_str:
+            self.max_tokens = int(max_tokens_str)
+
+
+@dataclass
 class ShopifyConfig:
     access_token: str = ""
     shop_domain: str = ""
@@ -76,10 +90,12 @@ class LoggingConfig:
 class Settings:
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     anthropic: AnthropicConfig = field(default_factory=AnthropicConfig)
+    openai: OpenAIConfig = field(default_factory=OpenAIConfig)
     shopify: ShopifyConfig = field(default_factory=ShopifyConfig)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     mcp: MCPConfig = field(default_factory=MCPConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    llm_provider: str = ""
 
     # Application settings
     conversation_history_limit: int = 10
@@ -94,13 +110,24 @@ class Settings:
     aggregation_interval: int = 50                # Run global insight aggregation every N interactions
     max_context_tokens: int = 2000                # Token budget for learning context in system prompt
 
+    def __post_init__(self):
+        self.llm_provider = os.getenv("LLM_PROVIDER", "anthropic")
+
     def validate(self) -> list[str]:
         """Validate required configuration. Returns list of missing items."""
         missing = []
         if not self.telegram.bot_token:
             missing.append("TELEGRAM_BOT_TOKEN")
-        if not self.anthropic.api_key:
-            missing.append("ANTHROPIC_API_KEY")
+
+        # Check for appropriate LLM API key based on provider
+        if self.llm_provider == "openai":
+            if not self.openai.api_key:
+                missing.append("OPENAI_API_KEY")
+        else:
+            # Default to Anthropic
+            if not self.anthropic.api_key:
+                missing.append("ANTHROPIC_API_KEY")
+
         if not self.shopify.access_token:
             missing.append("SHOPIFY_ACCESS_TOKEN")
         if not self.shopify.shop_domain:
