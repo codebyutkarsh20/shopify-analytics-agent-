@@ -10,14 +10,24 @@ enabling features the MCP tools don't support:
 """
 
 import json
+import re
+from datetime import datetime
 from typing import Optional, Dict, Any, List
 
 import httpx
+import pytz
 
 from src.config.settings import Settings
 from src.utils.logger import get_logger
+from src.utils.timezone import IST
 
 logger = get_logger(__name__)
+
+# ISO-8601 pattern that matches Shopify UTC timestamps like:
+# "2026-02-08T18:45:00Z" or "2026-02-08T18:45:00+00:00"
+_ISO_TIMESTAMP_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$"
+)
 
 # Valid Shopify Admin API GraphQL sort keys per resource
 PRODUCT_SORT_KEYS = [
@@ -89,7 +99,45 @@ class ShopifyGraphQLClient:
                 logger.error("GraphQL errors", errors=error_messages)
                 raise ValueError(f"GraphQL errors: {'; '.join(error_messages)}")
 
-            return data.get("data", {})
+            result = data.get("data", {})
+
+            # ── Convert ALL Shopify UTC timestamps to IST at the gateway ──
+            self._convert_all_timestamps_to_ist(result)
+
+            return result
+
+    # ── Centralized UTC → IST conversion ────────────────────────────
+
+    def _convert_all_timestamps_to_ist(self, obj: Any) -> None:
+        """Recursively walk a GraphQL response and convert UTC timestamps to IST in-place.
+
+        Detects Shopify timestamp fields by two heuristics:
+        1. Key ends with "At" (camelCase, e.g. createdAt, updatedAt, processedAt)
+        2. Key ends with "_at" (snake_case, e.g. created_at, updated_at)
+
+        Only converts values that look like ISO-8601 strings with a timezone
+        component (contains 'Z' or '+00:00'), to avoid touching non-timestamp fields.
+        """
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                if (
+                    isinstance(value, str)
+                    and (key.endswith("At") or key.lower().endswith("_at"))
+                    and _ISO_TIMESTAMP_RE.match(value)
+                ):
+                    try:
+                        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                        obj[key] = dt.astimezone(IST).isoformat()
+                    except (ValueError, TypeError):
+                        logger.warning(
+                            "Failed to convert timestamp to IST",
+                            field=key, value=value,
+                        )
+                else:
+                    self._convert_all_timestamps_to_ist(value)
+        elif isinstance(obj, list):
+            for item in obj:
+                self._convert_all_timestamps_to_ist(item)
 
     async def execute_raw_query(
         self, query: str, variables: Optional[Dict] = None

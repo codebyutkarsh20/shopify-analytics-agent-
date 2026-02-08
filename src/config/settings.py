@@ -97,6 +97,9 @@ class Settings:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     llm_provider: str = ""
 
+    # Timezone
+    timezone: str = "Asia/Kolkata"
+
     # Application settings
     conversation_history_limit: int = 10
     learning_pattern_threshold: int = 5
@@ -112,6 +115,7 @@ class Settings:
 
     def __post_init__(self):
         self.llm_provider = os.getenv("LLM_PROVIDER", "anthropic")
+        self.timezone = os.getenv("TIMEZONE", "Asia/Kolkata")
 
     def validate(self) -> list[str]:
         """Validate required configuration. Returns list of missing items."""

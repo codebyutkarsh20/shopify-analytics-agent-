@@ -9,9 +9,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-import pytz
-from dateutil.parser import parse as dateutil_parse
-from dateutil.relativedelta import relativedelta
+from src.utils.timezone import IST, now_ist_aware, localize_to_ist
 
 
 @dataclass
@@ -23,11 +21,11 @@ class DateRange:
     label: str
 
     def __post_init__(self) -> None:
-        """Ensure dates are timezone-aware (UTC)."""
+        """Ensure dates are timezone-aware (IST)."""
         if self.start_date.tzinfo is None:
-            self.start_date = pytz.UTC.localize(self.start_date)
+            self.start_date = localize_to_ist(self.start_date)
         if self.end_date.tzinfo is None:
-            self.end_date = pytz.UTC.localize(self.end_date)
+            self.end_date = localize_to_ist(self.end_date)
 
 
 def parse_date_range(text: str) -> DateRange:
@@ -60,7 +58,7 @@ def parse_date_range(text: str) -> DateRange:
         >>> # DateRange for the last 30 days
     """
     text_lower = text.lower().strip()
-    now = datetime.now(pytz.UTC)
+    now = now_ist_aware()
 
     # Yesterday
     if text_lower == "yesterday":

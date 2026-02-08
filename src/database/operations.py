@@ -9,6 +9,8 @@ from sqlalchemy import create_engine, select, func, and_
 from sqlalchemy.orm import Session as SQLSession, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from src.utils.timezone import now_ist
+
 from src.database.models import (
     Base,
     User,
@@ -149,7 +151,7 @@ class DatabaseOperations:
             user = session.execute(stmt).scalar_one_or_none()
 
             if user:
-                user.last_active = datetime.utcnow()
+                user.last_active = now_ist()
                 session.commit()
         finally:
             session.close()
@@ -410,7 +412,7 @@ class DatabaseOperations:
         """
         session = self.get_session()
         try:
-            cutoff_date = datetime.utcnow() - timedelta(days=days)
+            cutoff_date = now_ist() - timedelta(days=days)
             stmt = (
                 select(Conversation)
                 .where(
@@ -499,7 +501,7 @@ class DatabaseOperations:
                 )
             else:
                 pattern.frequency += 1
-                pattern.last_used = datetime.utcnow()
+                pattern.last_used = now_ist()
 
             session.add(pattern)
             session.commit()
@@ -609,7 +611,7 @@ class DatabaseOperations:
             else:
                 preference.preference_value = preference_value
                 preference.confidence_score = confidence_score
-                preference.updated_at = datetime.utcnow()
+                preference.updated_at = now_ist()
 
             session.add(preference)
             session.commit()
@@ -733,7 +735,7 @@ class DatabaseOperations:
         """
         session = self.get_session()
         try:
-            cutoff_date = datetime.utcnow() - timedelta(days=days)
+            cutoff_date = now_ist() - timedelta(days=days)
             stmt = select(ToolUsage).where(
                 and_(
                     ToolUsage.user_id == user_id,
@@ -868,7 +870,7 @@ class DatabaseOperations:
         """
         session = self.get_session()
         try:
-            cutoff_date = datetime.utcnow() - timedelta(days=days)
+            cutoff_date = now_ist() - timedelta(days=days)
             conditions = [QueryError.created_at >= cutoff_date]
 
             # user_id=0 means system-level — include all; otherwise filter
@@ -957,7 +959,7 @@ class DatabaseOperations:
         """
         session = self.get_session()
         try:
-            cutoff_date = datetime.utcnow() - timedelta(days=days)
+            cutoff_date = now_ist() - timedelta(days=days)
             stmt = select(QueryError).where(QueryError.created_at >= cutoff_date)
             errors = session.execute(stmt).scalars().all()
 
@@ -996,7 +998,7 @@ class DatabaseOperations:
         """
         session = self.get_session()
         try:
-            cutoff_date = datetime.utcnow() - timedelta(days=days)
+            cutoff_date = now_ist() - timedelta(days=days)
             stmt = select(QueryError).where(QueryError.created_at >= cutoff_date)
             errors = session.execute(stmt).scalars().all()
 
@@ -1044,7 +1046,7 @@ class DatabaseOperations:
             if cache is None:
                 return None
 
-            if cache.expires_at < datetime.utcnow():
+            if cache.expires_at < now_ist():
                 session.delete(cache)
                 session.commit()
                 return None
@@ -1082,7 +1084,7 @@ class DatabaseOperations:
             )
             cache = session.execute(stmt).scalar_one_or_none()
 
-            expires_at = datetime.utcnow() + timedelta(hours=ttl_hours)
+            expires_at = now_ist() + timedelta(hours=ttl_hours)
 
             if cache is None:
                 cache = AnalyticsCache(
@@ -1112,7 +1114,7 @@ class DatabaseOperations:
         session = self.get_session()
         try:
             stmt = select(AnalyticsCache).where(
-                AnalyticsCache.expires_at < datetime.utcnow()
+                AnalyticsCache.expires_at < now_ist()
             )
             expired = session.execute(stmt).scalars().all()
 
@@ -1229,7 +1231,7 @@ class DatabaseOperations:
             sess = session.execute(stmt).scalar_one_or_none()
 
             if sess:
-                sess.ended_at = datetime.utcnow()
+                sess.ended_at = now_ist()
                 if summary:
                     sess.session_summary = summary
                 session.commit()
@@ -1260,7 +1262,7 @@ class DatabaseOperations:
             sess = session.execute(stmt).scalar_one_or_none()
 
             if sess:
-                sess.last_message_at = datetime.utcnow()
+                sess.last_message_at = now_ist()
                 sess.message_count = (sess.message_count or 0) + 1
                 if intent:
                     sess.primary_intent = intent
@@ -1478,7 +1480,7 @@ class DatabaseOperations:
                     )
                 else:
                     template.avg_execution_time_ms = execution_time_ms
-                template.last_used_at = datetime.utcnow()
+                template.last_used_at = now_ist()
                 session.commit()
                 session.refresh(template)
 
@@ -1710,7 +1712,7 @@ class DatabaseOperations:
                 pattern.times_succeeded = (pattern.times_succeeded or 0) + 1
                 total = pattern.times_applied or 1
                 pattern.confidence = (pattern.times_succeeded or 0) / total
-                pattern.last_used_at = datetime.utcnow()
+                pattern.last_used_at = now_ist()
                 session.commit()
                 session.refresh(pattern)
 
@@ -1826,7 +1828,7 @@ class DatabaseOperations:
                 insight.insight_value = insight_value
                 insight.sample_size = (insight.sample_size or 0) + sample_size
                 insight.confidence = confidence
-                insight.updated_at = datetime.utcnow()
+                insight.updated_at = now_ist()
 
             session.add(insight)
             session.commit()
@@ -1901,7 +1903,7 @@ class DatabaseOperations:
         """
         session = self.get_session()
         try:
-            cutoff_date = datetime.utcnow() - timedelta(days=max_age_days)
+            cutoff_date = now_ist() - timedelta(days=max_age_days)
             stmt = select(GlobalInsight).where(GlobalInsight.updated_at < cutoff_date)
             stale = session.execute(stmt).scalars().all()
 
@@ -1971,7 +1973,7 @@ class DatabaseOperations:
         """
         session = self.get_session()
         try:
-            cutoff_date = datetime.utcnow() - timedelta(days=days)
+            cutoff_date = now_ist() - timedelta(days=days)
             stmt = (
                 select(func.avg(ResponseFeedback.quality_score))
                 .where(
@@ -2113,7 +2115,7 @@ class DatabaseOperations:
             ch_session = session.execute(stmt).scalar_one_or_none()
 
             if ch_session:
-                ch_session.last_active = datetime.utcnow()
+                ch_session.last_active = now_ist()
                 session.commit()
                 session.refresh(ch_session)
 

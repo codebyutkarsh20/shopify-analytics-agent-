@@ -19,6 +19,7 @@ from src.learning.template_manager import TemplateManager
 from src.learning.recovery_manager import RecoveryManager
 from src.services.shopify_graphql import ShopifyGraphQLClient
 from src.utils.logger import get_logger
+from src.utils.timezone import now_ist
 
 logger = get_logger(__name__)
 
@@ -397,7 +398,8 @@ class LLMService(ABC):
                 "Use for: rankings (top products, biggest orders, best customers), "
                 "date-filtered queries, sorting by any field (price, revenue, date), "
                 "and paginating through large result sets. "
-                "Queries Shopify's GraphQL Admin API directly."
+                "Queries Shopify's GraphQL Admin API directly. "
+                "All timestamps in the response are already in IST (UTC+5:30) — display as-is, do NOT convert."
             ),
             "input_schema": {
                 "type": "object",
@@ -452,7 +454,8 @@ class LLMService(ABC):
                 "draft orders, metafields, collections, fulfillments, refunds, "
                 "or any complex/nested query. You write the full GraphQL query. "
                 "READ-ONLY: mutations are blocked for safety. "
-                "The Shopify Admin API uses Relay-style connections (edges/node pattern)."
+                "The Shopify Admin API uses Relay-style connections (edges/node pattern). "
+                "All timestamps in the response are already in IST (UTC+5:30) — display as-is, do NOT convert."
             ),
             "input_schema": {
                 "type": "object",
@@ -592,8 +595,14 @@ class LLMService(ABC):
             system_parts = [
                 "You are a Shopify Analytics Assistant. Your role is to help merchants analyze their store data, understand sales trends, and make data-driven decisions.",
                 "",
-                f"Current date and time: {datetime.now().isoformat()}",
+                f"Current date and time (IST, Indian Standard Time, UTC+5:30): {now_ist().isoformat()}",
                 f"Store domain: {self.settings.shopify.shop_domain}",
+                "",
+                "IMPORTANT — TIMEZONE HANDLING:",
+                "- All timestamps in tool results are ALREADY converted to IST (Indian Standard Time, UTC+5:30).",
+                "- Do NOT convert or adjust any timestamps — display them exactly as received.",
+                "- When showing a timestamp like '2026-02-09T00:15:00+05:30', display it as 'Feb 9, 2026 at 12:15 AM IST'.",
+                "- Always append 'IST' when showing times to the user.",
             ]
 
             # Context from context builder

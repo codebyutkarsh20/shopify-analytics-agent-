@@ -6,6 +6,8 @@ from typing import Optional
 from sqlalchemy import ForeignKey, String, Integer, Text, Boolean, Float, DateTime, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
+from src.utils.timezone import now_ist
+
 
 class Base(DeclarativeBase):
     """Base class for all SQLAlchemy models."""
@@ -27,8 +29,8 @@ class User(Base):
     first_name: Mapped[Optional[str]] = mapped_column(String(255))
     display_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     interaction_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
-    last_active: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist, nullable=False)
+    last_active: Mapped[datetime] = mapped_column(DateTime, default=now_ist, onupdate=now_ist, nullable=False)
 
     # Relationships
     stores: Mapped[list["ShopifyStore"]] = relationship(back_populates="user", cascade="all, delete-orphan")
@@ -64,8 +66,8 @@ class ChannelSession(Base):
     channel_username: Mapped[Optional[str]] = mapped_column(String(255))
     channel_metadata: Mapped[Optional[str]] = mapped_column(Text)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
-    last_active: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist, nullable=False)
+    last_active: Mapped[datetime] = mapped_column(DateTime, default=now_ist, nullable=False)
 
     # Relationships
     user: Mapped["User"] = relationship(back_populates="channel_sessions")
@@ -87,7 +89,7 @@ class ShopifyStore(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
     shop_domain: Mapped[str] = mapped_column(String(255), nullable=False)
     access_token: Mapped[str] = mapped_column(String(255), nullable=False)
-    installed_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    installed_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist, nullable=False)
 
     # Relationships
     user: Mapped["User"] = relationship(back_populates="stores")
@@ -108,7 +110,7 @@ class AnalyticsCache(Base):
     cache_key: Mapped[str] = mapped_column(String(255), nullable=False)
     cache_data: Mapped[str] = mapped_column(Text, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist, nullable=False, index=True)
 
     # Relationships
     store: Mapped["ShopifyStore"] = relationship(back_populates="analytics_cache")
@@ -134,8 +136,8 @@ class Session(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
     channel_type: Mapped[str] = mapped_column(String(50), default="telegram", nullable=False)
-    started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
-    last_message_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist, nullable=False)
+    last_message_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist, nullable=False)
     ended_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     primary_intent: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     message_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
@@ -164,7 +166,7 @@ class Conversation(Base):
     tool_calls_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     response_quality_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     template_id_used: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist, nullable=False, index=True)
 
     # Relationships
     user: Mapped["User"] = relationship(back_populates="conversations")
@@ -189,7 +191,7 @@ class QueryPattern(Base):
     pattern_type: Mapped[str] = mapped_column(String(100), nullable=False)
     pattern_value: Mapped[str] = mapped_column(String(255), nullable=False)
     frequency: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
-    last_used: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    last_used: Mapped[datetime] = mapped_column(DateTime, default=now_ist, onupdate=now_ist, nullable=False)
 
     # Relationships
     user: Mapped["User"] = relationship(back_populates="query_patterns")
@@ -209,7 +211,7 @@ class UserPreference(Base):
     preference_key: Mapped[str] = mapped_column(String(100), nullable=False)
     preference_value: Mapped[str] = mapped_column(Text, nullable=False)
     confidence_score: Mapped[float] = mapped_column(Float, default=0.5, nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist, onupdate=now_ist, nullable=False)
 
     # Relationships
     user: Mapped["User"] = relationship(back_populates="preferences")
@@ -238,8 +240,8 @@ class QueryTemplate(Base):
     avg_execution_time_ms: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     confidence: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
     created_by_user_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
-    last_used_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist, nullable=False)
+    last_used_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist, nullable=False)
     example_queries: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     def __repr__(self) -> str:
@@ -265,7 +267,7 @@ class ToolUsage(Base):
     query_template_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     error_type: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     channel_type: Mapped[str] = mapped_column(String(50), default="telegram", nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist, nullable=False, index=True)
 
     # Relationships
     user: Mapped["User"] = relationship(back_populates="tool_usage")
@@ -297,7 +299,7 @@ class QueryError(Base):
     )
     was_auto_recovered: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     original_intent: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist, nullable=False, index=True)
 
     # Relationships
     user: Mapped["User"] = relationship(back_populates="query_errors")
@@ -328,8 +330,8 @@ class ErrorRecoveryPattern(Base):
     times_applied: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     times_succeeded: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     confidence: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
-    last_used_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist, nullable=False)
+    last_used_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist, nullable=False)
 
     def __repr__(self) -> str:
         return f"<ErrorRecoveryPattern(id={self.id}, error_type={self.error_type}, confidence={self.confidence:.2f})>"
@@ -357,7 +359,7 @@ class GlobalInsight(Base):
     insight_value: Mapped[str] = mapped_column(Text, nullable=False)
     sample_size: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     confidence: Mapped[float] = mapped_column(Float, default=0.5, nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist, nullable=False)
 
     def __repr__(self) -> str:
         return f"<GlobalInsight(id={self.id}, type={self.insight_type}, key={self.insight_key})>"
@@ -380,7 +382,7 @@ class ResponseFeedback(Base):
     query_type: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     tool_used: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     signal_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist, nullable=False)
 
     # Relationships
     conversation: Mapped["Conversation"] = relationship(back_populates="feedback")

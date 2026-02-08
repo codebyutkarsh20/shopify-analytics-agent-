@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import List, Optional
 
 from src.utils.logger import get_logger
+from src.utils.timezone import now_ist
 
 logger = get_logger(__name__)
 
@@ -114,7 +115,7 @@ class PatternLearner:
         # 4. Extract and record business context
         business_context = self.extract_business_context(query)
         if business_context:
-            timestamp = datetime.utcnow().isoformat()
+            timestamp = now_ist().isoformat()
             preference_key = f"business_context_{timestamp}"
             self.db_ops.set_preference(
                 user_id=user_id,

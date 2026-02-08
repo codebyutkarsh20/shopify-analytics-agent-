@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Optional
 
 from src.utils.logger import get_logger
+from src.utils.timezone import now_ist
 
 logger = get_logger(__name__)
 
@@ -151,13 +152,13 @@ class PreferenceManager:
         try:
             member_info = self.db_ops.get_user_first_query_time(user_id)
             member_since = (
-                member_info.get("first_query_time", datetime.utcnow().isoformat())
+                member_info.get("first_query_time", now_ist().isoformat())
                 if member_info
-                else datetime.utcnow().isoformat()
+                else now_ist().isoformat()
             )
         except (AttributeError, TypeError):
             logger.debug("Member since not available, using current time")
-            member_since = datetime.utcnow().isoformat()
+            member_since = now_ist().isoformat()
 
         # Get total query count
         try:

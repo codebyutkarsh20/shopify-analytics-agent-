@@ -2,10 +2,10 @@
 
 import pytest
 from datetime import datetime, timedelta
-import pytz
 
 from src.utils.date_parser import parse_date_range, get_comparison_range
 from src.utils.formatters import format_currency, format_percentage
+from src.utils.timezone import IST, now_ist_aware
 
 
 class TestDateParser:
@@ -25,7 +25,7 @@ class TestDateParser:
         assert result.end_date.minute == 59
 
         # Verify it's yesterday
-        now = datetime.now(pytz.UTC)
+        now = now_ist_aware()
         yesterday = now - timedelta(days=1)
 
         assert result.start_date.date() == yesterday.date()
@@ -43,7 +43,7 @@ class TestDateParser:
         assert result.start_date.minute == 0
 
         # End should be close to now
-        now = datetime.now(pytz.UTC)
+        now = now_ist_aware()
         assert result.end_date.date() == now.date()
 
     def test_parse_last_7_days(self):

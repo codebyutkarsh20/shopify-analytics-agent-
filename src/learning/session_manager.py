@@ -11,6 +11,7 @@ from typing import Optional
 
 from src.database.models import Session
 from src.utils.logger import get_logger
+from src.utils.timezone import now_ist
 
 logger = get_logger(__name__)
 
@@ -90,7 +91,7 @@ class SessionManager:
             )
 
         # Step 2: Compute time gap
-        now = datetime.utcnow()
+        now = now_ist()
         last_msg = active_session.last_message_at or active_session.started_at
         time_gap = (now - last_msg).total_seconds()
 
