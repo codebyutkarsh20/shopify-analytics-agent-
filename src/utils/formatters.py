@@ -8,12 +8,66 @@ than MarkdownV2 for dynamic content).
 
 import html
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
 def escape(text: str) -> str:
     """Escape text for Telegram HTML parse mode."""
     return html.escape(str(text))
+
+
+def _convert_markdown_tables(text: str) -> str:
+    """Convert markdown tables to clean Telegram-friendly bulleted lists.
+
+    Markdown tables render as garbage in Telegram, so we convert them
+    to a structured list format:
+        | Name | Revenue | Units |     →   • **Name:** Revenue (Units)
+        |------|---------|-------|
+        | Foo  | $100    | 5     |     →   • **Foo** — $100 | 5
+    """
+    lines = text.split("\n")
+    result = []
+    i = 0
+
+    while i < len(lines):
+        line = lines[i].strip()
+
+        # Detect a table row: starts and ends with |
+        if line.startswith("|") and line.endswith("|"):
+            # Collect all consecutive table rows
+            table_rows = []
+            while i < len(lines) and lines[i].strip().startswith("|") and lines[i].strip().endswith("|"):
+                row = lines[i].strip()
+                # Skip separator rows like |---|---|---|
+                if not re.match(r"^\|[\s\-:]+\|$", row.replace("|", "|")):
+                    cells = [c.strip() for c in row.strip("|").split("|")]
+                    if any(c for c in cells):  # Skip empty rows
+                        table_rows.append(cells)
+                i += 1
+
+            if len(table_rows) >= 2:
+                headers = table_rows[0]
+                data_rows = table_rows[1:]
+
+                for row in data_rows:
+                    parts = []
+                    for col_idx, cell in enumerate(row):
+                        if col_idx == 0:
+                            parts.append(f"**{cell}**")
+                        elif cell:
+                            parts.append(cell)
+                    result.append("• " + " — ".join(parts))
+                result.append("")  # blank line after table
+            elif table_rows:
+                # Single row table, just list the cells
+                for row in table_rows:
+                    result.append("• " + " | ".join(c for c in row if c))
+                result.append("")
+        else:
+            result.append(lines[i])
+            i += 1
+
+    return "\n".join(result)
 
 
 def markdown_to_telegram_html(text: str) -> str:
@@ -54,6 +108,9 @@ def markdown_to_telegram_html(text: str) -> str:
 
     # ── Step 3: Convert Markdown → Telegram HTML ──
 
+    # Markdown tables → clean bulleted lines (before other conversions)
+    text = _convert_markdown_tables(text)
+
     # Headings: ## text  or  ## **text** → bold on its own line
     def _heading(m):
         heading_text = m.group(1).strip().strip("*").strip()
@@ -76,7 +133,6 @@ def markdown_to_telegram_html(text: str) -> str:
     text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', text)
 
     # Numbered lists: "1. item" → "1. item"  (keep number, just clean up)
-    # Already looks fine in Telegram — just ensure consistent spacing
     text = re.sub(r"^(\d+)\.\s+", r"\1. ", text, flags=re.MULTILINE)
 
     # Bullet points: - item or * item → • item  (top-level)
@@ -177,22 +233,22 @@ def format_percentage(value: float, decimal_places: int = 1, is_ratio: bool = Fa
     Format a number as a percentage.
 
     Args:
-        value: The value to format as percentage. Treated as already in
-               percentage form (e.g., 15.5 means 15.5%) unless is_ratio=True.
+        value: The value to format as percentage. Values below 2 are
+               auto-detected as ratios and multiplied by 100 (e.g., 0.5 -> 50%).
+               Values >= 2 are treated as already in percentage form.
         decimal_places: Number of decimal places to show
-        is_ratio: If True, treat value as a 0-1 ratio and multiply by 100
+        is_ratio: If True, force treating value as a 0-1 ratio and multiply by 100
 
     Returns:
-        Formatted percentage string (e.g., "+15.5%" or "-10.3%")
+        Formatted percentage string (e.g., "15.5%" or "-10.3%")
     """
     if value is None:
         return "0%"
 
-    if is_ratio:
+    if is_ratio or value < 2:
         value = value * 100
 
-    sign = "+" if value > 0 else ""
-    return f"{sign}{value:.{decimal_places}f}%"
+    return f"{value:.{decimal_places}f}%"
 
 
 def format_change(current: float, previous: float) -> tuple[str, str]:
@@ -204,7 +260,7 @@ def format_change(current: float, previous: float) -> tuple[str, str]:
         previous: Previous value
 
     Returns:
-        Tuple of (percent_change, absolute_change) formatted strings
+        Tuple of (percent_change, direction_indicator) formatted strings
     """
     if previous == 0 or previous is None:
         if current is None:
@@ -214,8 +270,16 @@ def format_change(current: float, previous: float) -> tuple[str, str]:
     percent_change = ((current - previous) / previous) * 100
     absolute_change = current - previous
 
-    pct_str = f"{percent_change:+.1f}%"
-    abs_str = f"{absolute_change:+.0f}"
+    # Use arrow indicators for visual clarity
+    if percent_change > 0:
+        arrow = "▲"
+    elif percent_change < 0:
+        arrow = "▼"
+    else:
+        arrow = "─"
+
+    pct_str = f"{arrow} {abs(percent_change):.1f}%"
+    abs_str = f"{absolute_change:+,.0f}"
 
     return (pct_str, abs_str)
 
@@ -229,40 +293,44 @@ def format_analytics_response(
     lines = []
 
     date_range = escape(metrics.get("date_range", "Last 7 Days"))
-    lines.append(f"<b>📊 Analytics Report: {date_range}</b>\n")
+    lines.append(f"<b>📊 Analytics Report — {date_range}</b>")
+    lines.append("")
 
     revenue = metrics.get("revenue", 0)
-    lines.append(f"💰 <b>Revenue:</b> {format_currency(revenue)}")
+    rev_line = f"💰 <b>Revenue:</b> <code>{format_currency(revenue)}</code>"
     if comparison_metrics:
         prev_revenue = comparison_metrics.get("revenue", 0)
         pct_change, abs_change = format_change(revenue, prev_revenue)
-        lines.append(f"   └─ {pct_change} ({abs_change})")
+        rev_line += f"  ({pct_change})"
+    lines.append(rev_line)
 
     orders = metrics.get("orders", 0)
-    lines.append(f"📦 <b>Orders:</b> {orders:,.0f}")
+    ord_line = f"📦 <b>Orders:</b> <code>{orders:,.0f}</code>"
     if comparison_metrics:
         prev_orders = comparison_metrics.get("orders", 0)
         pct_change, abs_change = format_change(orders, prev_orders)
-        lines.append(f"   └─ {pct_change} ({abs_change})")
+        ord_line += f"  ({pct_change})"
+    lines.append(ord_line)
 
     aov = metrics.get("aov", 0)
-    lines.append(f"💵 <b>AOV:</b> {format_currency(aov)}")
+    aov_line = f"💵 <b>AOV:</b> <code>{format_currency(aov)}</code>"
     if comparison_metrics:
         prev_aov = comparison_metrics.get("aov", 0)
         pct_change, abs_change = format_change(aov, prev_aov)
-        lines.append(f"   └─ {pct_change} ({abs_change})")
+        aov_line += f"  ({pct_change})"
+    lines.append(aov_line)
 
     conversion_rate = metrics.get("conversion_rate")
     if conversion_rate is not None:
-        lines.append(f"📈 <b>Conversion Rate:</b> {format_percentage(conversion_rate)}")
+        lines.append(f"📈 <b>Conversion:</b> <code>{format_percentage(conversion_rate)}</code>")
 
     visitors = metrics.get("visitors")
     if visitors is not None:
-        lines.append(f"👥 <b>Visitors:</b> {visitors:,.0f}")
+        lines.append(f"👥 <b>Visitors:</b> <code>{visitors:,.0f}</code>")
 
-    lines.append("")
     insight = metrics.get("insight")
     if insight:
+        lines.append("")
         lines.append(f"💡 <b>Insight:</b> {escape(insight)}")
 
     return "\n".join(lines)
@@ -272,17 +340,19 @@ def format_product_performance(
     products: list[Dict[str, Any]], limit: int = 5
 ) -> str:
     """Format top products into a Telegram HTML message."""
-    lines = ["<b>🏆 Top Products</b>\n"]
+    lines = ["<b>🏆 Top Products</b>", ""]
 
     for idx, product in enumerate(products[:limit], 1):
         name = escape(product.get("name", "Unknown"))
         revenue = product.get("revenue", 0)
         units = product.get("units_sold", 0)
-        lines.append(f"{idx}. <b>{name}</b>")
-        lines.append(f"   💰 {format_currency(revenue)} | 📦 {units:,.0f} units")
+        lines.append(
+            f"{idx}. <b>{name}</b>\n"
+            f"    💰 <code>{format_currency(revenue)}</code>  •  📦 {units:,.0f} units"
+        )
 
     if not products:
-        lines.append("No product data available.")
+        lines.append("<i>No product data available.</i>")
 
     return "\n".join(lines)
 
@@ -291,15 +361,13 @@ def format_error_message(error: Any) -> str:
     """Format an error message in a user-friendly way (HTML)."""
     if isinstance(error, Exception):
         error_msg = escape(str(error))
-        error_type = escape(type(error).__name__)
     else:
         error_msg = escape(str(error))
-        error_type = "Error"
 
     return (
-        f"❌ <b>{error_type}</b>\n"
-        f"Sorry, I encountered an issue: <code>{error_msg}</code>\n\n"
-        f"Please try again or contact support if the problem persists."
+        "⚠️ <b>Something went wrong</b>\n\n"
+        f"<code>{error_msg[:300]}</code>\n\n"
+        "Please try rephrasing your question or use /help to see examples."
     )
 
 
@@ -307,32 +375,47 @@ def format_welcome_message(user_name: str = "there") -> str:
     """Format a welcome message for new users (HTML)."""
     safe_name = escape(user_name)
     return (
-        f"👋 Welcome, {safe_name}!\n\n"
-        f"I'm your Shopify Analytics Assistant. I can help you:\n"
-        f"• 📊 View sales metrics and trends\n"
-        f"• 🏆 See your top products\n"
-        f"• 📈 Track performance over time\n"
-        f"• 💹 Compare periods\n\n"
-        f'Try saying "<b>show me sales for last 7 days</b>" or '
-        f'"<b>what were yesterday\'s orders</b>" to get started!'
+        f"👋 <b>Welcome, {safe_name}!</b>\n\n"
+        "I'm your <b>Shopify Analytics Assistant</b>. "
+        "Ask me anything about your store — sales, products, customers, and more.\n\n"
+        "<b>Try asking:</b>\n"
+        '• "Show me sales for last 7 days"\n'
+        '• "What are my top 5 products?"\n'
+        '• "Compare this week to last week"\n\n'
+        "Type /help for all commands and examples."
     )
 
 
 def format_help_message() -> str:
     """Format a help message listing bot capabilities (HTML)."""
     return (
-        "<b>🤖 Shopify Analytics Bot - Commands &amp; Capabilities</b>\n\n"
-        "<b>Sales Metrics:</b>\n"
-        '• "Show me sales for last 7 days"\n'
-        '• "What were yesterday\'s orders?"\n'
-        '• "Revenue this month"\n\n'
-        "<b>Product Performance:</b>\n"
-        '• "Top 5 products last month"\n'
-        '• "What are my bestsellers?"\n\n'
-        "<b>Comparisons:</b>\n"
+        "<b>📖 Commands &amp; Examples</b>\n\n"
+
+        "💰 <b>Sales &amp; Revenue</b>\n"
+        '• "Revenue last 7 days"\n'
+        '• "How many orders yesterday?"\n'
+        '• "Average order value this month"\n\n'
+
+        "🏆 <b>Products</b>\n"
+        '• "Top 5 products by revenue"\n'
+        '• "What are my bestsellers?"\n'
+        '• "Show products low on inventory"\n\n'
+
+        "👥 <b>Customers</b>\n"
+        '• "Who are my top spending customers?"\n'
+        '• "New customers this week"\n\n'
+
+        "📈 <b>Comparisons</b>\n"
         '• "Compare this week to last week"\n'
-        '• "How much did sales change last month?"\n\n'
-        "<b>Supported Time Ranges:</b>\n"
-        "today, yesterday, last 7 days, last 30 days, last month, this month\n\n"
-        "<i>Use natural language - I'll understand what you need!</i>"
+        '• "How did sales change last month?"\n\n'
+
+        "⚙️ <b>Bot Commands</b>\n"
+        "• /start — Initialize the bot\n"
+        "• /connect — Connect your Shopify store\n"
+        "• /status — Check connection status\n"
+        "• /settings — View preferences\n"
+        "• /forget — Clear learned data\n"
+        "• /help — Show this message\n\n"
+
+        "<i>Just type in natural language — I'll figure out the rest.</i>"
     )

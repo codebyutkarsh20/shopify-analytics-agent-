@@ -87,6 +87,8 @@ class OpenAIService(LLMService):
 
     def _parse_response(self, response: Any) -> Tuple[str, List[ToolCall]]:
         """Parse OpenAI response into text and tool calls."""
+        if not response.choices:
+            raise ValueError("OpenAI returned an empty choices list")
         choice = response.choices[0]
         message = choice.message
 

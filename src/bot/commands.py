@@ -93,21 +93,22 @@ class BotCommands:
 
             if store:
                 domain = escape(store.shop_domain)
+                name = escape(update.effective_user.first_name or "there")
                 welcome_msg = (
-                    f"👋 Welcome back!\n\n"
-                    f"Your Shopify store <b>{domain}</b> is connected.\n\n"
-                    f"Quick tips:\n"
-                    f'• Ask "<b>show me sales for last 7 days</b>"\n'
-                    f'• Ask "<b>what were yesterday\'s orders</b>"\n'
-                    f'• Ask "<b>top 5 products</b>"\n\n'
-                    f"Type /help for more commands."
+                    f"👋 <b>Welcome back, {name}!</b>\n\n"
+                    f"✅ Connected to <b>{domain}</b>\n\n"
+                    f"<b>Quick start:</b>\n"
+                    f'• "Show me sales for last 7 days"\n'
+                    f'• "What were yesterday\'s orders?"\n'
+                    f'• "Top 5 products by revenue"\n\n'
+                    f"Type /help for all commands."
                 )
             else:
                 welcome_msg = format_welcome_message(
                     user_name=update.effective_user.first_name or "there"
                 )
                 welcome_msg += (
-                    "\n\nUse /connect to connect your store."
+                    "\n\nUse /connect to link your Shopify store."
                 )
 
             await update.message.reply_text(welcome_msg, parse_mode=PARSE_MODE)
@@ -277,19 +278,25 @@ class BotCommands:
 
             profile = self.preference_manager.get_user_profile(user.id)
 
+            query_count = profile.get('query_count', 0)
+            member_since = escape(str(profile.get('member_since', 'N/A')))
+            fav_metric = escape(profile.get('favorite_metric', 'revenue'))
+            time_range = escape(profile.get('preferred_time_range', 'last_7_days')).replace('_', ' ')
+            query_type = escape(profile.get('primary_query_type', 'general'))
+
             settings_msg = (
                 "<b>⚙️ Your Settings</b>\n\n"
-                f"<b>Profile:</b>\n"
-                f"• Member since: <code>{escape(str(profile.get('member_since', 'N/A')))}</code>\n"
-                f"• Total queries: <code>{profile.get('query_count', 0)}</code>\n\n"
-                f"<b>Preferences:</b>\n"
-                f"• Favorite metric: <code>{escape(profile.get('favorite_metric', 'revenue'))}</code>\n"
-                f"• Preferred time range: <code>{escape(profile.get('preferred_time_range', 'last_7_days'))}</code>\n"
-                f"• Primary query type: <code>{escape(profile.get('primary_query_type', 'general'))}</code>\n\n"
-                f"<b>Commands:</b>\n"
-                f"• /forget - Clear all learned data\n"
-                f"• /connect - Reconnect store\n"
-                f"• /help - View help"
+                f"📋 <b>Profile</b>\n"
+                f"• Member since: <code>{member_since}</code>\n"
+                f"• Total queries: <code>{query_count}</code>\n\n"
+                f"🎯 <b>Learned Preferences</b>\n"
+                f"• Favorite metric: <code>{fav_metric}</code>\n"
+                f"• Time range: <code>{time_range}</code>\n"
+                f"• Query type: <code>{query_type}</code>\n\n"
+                f"<i>Preferences are learned automatically from your queries.</i>\n\n"
+                f"• /forget — Reset all learned data\n"
+                f"• /connect — Reconnect store\n"
+                f"• /help — All commands"
             )
 
             await update.message.reply_text(settings_msg, parse_mode=PARSE_MODE)
@@ -391,18 +398,19 @@ class BotCommands:
 
             if store:
                 domain = escape(store.shop_domain)
-                installed_at_str = store.installed_at.strftime('%Y-%m-%d %H:%M')
+                installed_at_str = store.installed_at.strftime('%b %d, %Y at %H:%M') if store.installed_at else "unknown"
                 status_msg = (
-                    f"✅ <b>Status: Connected</b>\n\n"
-                    f"<b>Store:</b> {domain}\n"
-                    f"<b>Connected since:</b> {installed_at_str}\n\n"
-                    f"Ready to process analytics queries."
+                    f"<b>📡 Bot Status</b>\n\n"
+                    f"✅ <b>Store:</b> <code>{domain}</code>\n"
+                    f"📅 <b>Connected:</b> {installed_at_str}\n\n"
+                    f"Everything looks good — ask me anything about your store!"
                 )
             else:
                 status_msg = (
-                    "❌ <b>Status: Not Connected</b>\n\n"
-                    "Your Shopify store is not connected.\n"
-                    "Use /connect to set up your store."
+                    "<b>📡 Bot Status</b>\n\n"
+                    "❌ <b>Store:</b> Not connected\n\n"
+                    "Use /connect to link your Shopify store, "
+                    "or add credentials to your <code>.env</code> file."
                 )
 
             await update.message.reply_text(status_msg, parse_mode=PARSE_MODE)

@@ -1,0 +1,44 @@
+version: "3.8"
+
+services:
+  shopify-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: shopify-analytics-bot
+    restart: unless-stopped
+
+    # Environment variables from .env file
+    env_file:
+      - .env
+
+    # Persist database and logs outside the container
+    volumes:
+      - bot-data:/app/data
+      - bot-logs:/app/logs
+
+    # Resource limits (adjust based on your VM size)
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+        reservations:
+          memory: 256M
+          cpus: "0.25"
+
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+    # Stop gracefully (matches SIGTERM handler in main.py)
+    stop_grace_period: 15s
+
+volumes:
+  bot-data:
+    name: shopify-bot-data
+  bot-logs:
+    name: shopify-bot-logs

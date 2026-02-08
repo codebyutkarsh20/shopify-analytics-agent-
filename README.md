@@ -83,6 +83,80 @@ OPENAI_MODEL=gpt-4o-mini        # or gpt-4o, gpt-4-turbo, etc.
 
 Both providers support the full tool-calling pipeline (Shopify GraphQL queries, multi-turn conversations, error recovery learning). The learning system, session management, and all other features work identically regardless of provider.
 
+## Production Deployment (Docker + Azure)
+
+### Prerequisites
+
+- An Azure VM (or any Linux server) with SSH access
+- SSH config entry in `~/.ssh/config`:
+  ```
+  Host sagar-azure
+      HostName <your-server-ip>
+      User azureuser
+  ```
+
+### First-Time Server Setup
+
+SSH into your server and run the setup script:
+
+```bash
+ssh sagar-azure
+# On the server:
+curl -fsSL https://get.docker.com | sh
+sudo usermod -aG docker $USER
+# Log out and back in, then:
+mkdir -p ~/shopify-analytics-agent
+```
+
+### Deploy
+
+From your **local machine** (project root):
+
+```bash
+# 1. Make sure your .env is configured
+cp .env.example .env
+# Edit .env with your real credentials
+
+# 2. Deploy to server
+./deploy.sh
+```
+
+The deploy script will:
+1. Sync code to the server via `rsync` (excludes `.env`, `data/`, `logs/`)
+2. Build the Docker image on the server
+3. Stop old container and start the new one
+4. Show container status and recent logs
+
+### Server Management
+
+```bash
+# View live logs
+ssh sagar-azure 'cd ~/shopify-analytics-agent && docker compose logs -f'
+
+# Restart the bot
+ssh sagar-azure 'cd ~/shopify-analytics-agent && docker compose restart'
+
+# Stop the bot
+ssh sagar-azure 'cd ~/shopify-analytics-agent && docker compose down'
+
+# Check status
+ssh sagar-azure 'cd ~/shopify-analytics-agent && docker compose ps'
+
+# View database (from inside container)
+ssh sagar-azure 'cd ~/shopify-analytics-agent && docker compose exec shopify-bot python -c "from src.database.init_db import init_database; print(\"DB OK\")"'
+```
+
+### Docker Details
+
+The production setup includes:
+- **Multi-stage build** — Compiled dependencies (numpy, pandas) are built in a separate stage, keeping the final image small
+- **Non-root user** — The bot runs as `botuser` inside the container
+- **Auto-restart** — `unless-stopped` restart policy survives server reboots
+- **Volume persistence** — Database (`data/`) and logs (`logs/`) persist in named Docker volumes
+- **Resource limits** — 512MB memory cap, 1 CPU max
+- **Log rotation** — Docker JSON log driver with 10MB max, 5 files
+- **Graceful shutdown** — 15-second stop grace period with SIGTERM handling
+
 ## Bot Commands
 
 | Command | Description |
@@ -195,6 +269,11 @@ shopify-analytics-agent/
 ├── main.py                              # Entry point - wires all components
 ├── requirements.txt                     # Python dependencies
 ├── .env.example                         # Environment variables template
+├── Dockerfile                           # Multi-stage production Docker image
+├── docker-compose.yml                   # Docker Compose service definition
+├── .dockerignore                        # Docker build context exclusions
+├── deploy.sh                            # One-command deploy to Azure server
+├── server-setup.sh                      # First-time server setup script
 ├── README.md                            # This file
 ├── MEMORY_SYSTEM_DESIGN.md              # Detailed learning system design doc
 │
@@ -260,13 +339,14 @@ pytest tests/ --cov=src
 
 ## Tech Stack
 
-- **Language:** Python 3.10+
+- **Language:** Python 3.12+
 - **Telegram:** `python-telegram-bot` 20.7 - Async Telegram bot framework
-- **AI:** `anthropic` - Claude AI with tool use for natural language understanding
+- **AI:** Anthropic Claude or OpenAI GPT - Multi-LLM with tool calling
 - **Shopify:** Direct GraphQL API via `httpx` - No MCP dependency
 - **Database:** SQLAlchemy 2.0 + SQLite (WAL mode) - ORM with 14 tables
 - **Async:** `aiohttp`, `asyncio`, `httpx` - Async HTTP and event loop
 - **Logging:** `structlog` - Structured JSON logging
+- **Deployment:** Docker + Docker Compose with auto-restart
 - **Testing:** `pytest`, `pytest-asyncio` - Async-compatible test framework
 
 ## Extending to WhatsApp

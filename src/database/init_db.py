@@ -10,6 +10,68 @@ from src.database.operations import DatabaseOperations
 logger = logging.getLogger(__name__)
 
 
+def _get_column_type_sql(column) -> str:
+    """Get SQLite-compatible column type from a SQLAlchemy column."""
+    try:
+        col_type = str(column.type)
+    except Exception:
+        col_type = "TEXT"
+
+    type_map = {
+        "VARCHAR": "TEXT",
+        "STRING": "TEXT",
+        "INTEGER": "INTEGER",
+        "FLOAT": "REAL",
+        "BOOLEAN": "INTEGER",
+        "DATETIME": "TIMESTAMP",
+        "TEXT": "TEXT",
+    }
+    upper = col_type.upper().split("(")[0]
+    return type_map.get(upper, "TEXT")
+
+
+def _migrate_missing_columns(engine) -> None:
+    """Add missing columns to existing tables.
+
+    SQLAlchemy's create_all() only creates NEW tables — it does NOT add
+    columns to existing tables.  This function compares every model's
+    columns against the live database and issues ALTER TABLE ADD COLUMN
+    for anything that's missing.
+    """
+    inspector = inspect(engine)
+    existing_tables = inspector.get_table_names()
+    migrations_applied = 0
+
+    for table_name, table in Base.metadata.tables.items():
+        if table_name not in existing_tables:
+            continue
+
+        existing_columns = {col["name"] for col in inspector.get_columns(table_name)}
+
+        for col in table.columns:
+            if col.name in existing_columns:
+                continue
+
+            col_type = _get_column_type_sql(col)
+            nullable = col.nullable if col.nullable is not None else True
+            default = "NULL" if nullable else "''"
+
+            sql = f'ALTER TABLE "{table_name}" ADD COLUMN "{col.name}" {col_type} DEFAULT {default}'
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text(sql))
+                    conn.commit()
+                logger.info(f"Migration: added column {table_name}.{col.name} ({col_type})")
+                migrations_applied += 1
+            except Exception as e:
+                logger.warning(f"Failed to add column {table_name}.{col.name}: {e}")
+
+    if migrations_applied:
+        logger.info(f"Schema migration complete: {migrations_applied} column(s) added")
+    else:
+        logger.info("Schema migration check: no changes needed")
+
+
 def init_database(database_url: Optional[str] = None) -> DatabaseOperations:
     """
     Initialize database and create all tables.
@@ -49,14 +111,20 @@ def init_database(database_url: Optional[str] = None) -> DatabaseOperations:
                 conn.commit()
             logger.info("Migrated table: mcp_tool_usage → tool_usage")
     except Exception as e:
-        logger.warning("Table migration check failed (safe to ignore on fresh DB)", error=str(e))
+        logger.warning("Table migration check failed (safe to ignore on fresh DB)")
+
+    # Migration: add any missing columns to existing tables
+    try:
+        _migrate_missing_columns(db_ops.engine)
+    except Exception as e:
+        logger.warning(f"Column migration check failed: {e}")
 
     # Seed query templates on first run
     try:
         from src.learning.template_seeds import seed_templates
         seed_templates(db_ops)
     except Exception as e:
-        logger.warning("Template seeding failed", error=str(e))
+        logger.warning("Template seeding failed")
 
     return db_ops
 

@@ -137,8 +137,8 @@ class MessageHandler:
             self.db_ops.update_user_activity(user.id)
             try:
                 self.db_ops.increment_user_interaction(user.id)
-            except Exception:
-                pass  # Non-critical if column doesn't exist yet
+            except Exception as e:
+                logger.debug("increment_user_interaction skipped", error=str(e))
 
             # Step 2: Classify intent
             intent = self.pattern_learner.classify_intent(message_text)

@@ -334,9 +334,10 @@ class ContextBuilder:
         if context.get("recommended_templates"):
             lines.append("\nPROVEN QUERY TEMPLATES (use these when the intent matches):")
             for t in context["recommended_templates"][:3]:
-                lines.append(f"  Intent: {t.intent_description[:100]}")
+                description = (t.intent_description or "")[:100]
+                lines.append(f"  Intent: {description}")
                 lines.append(f"  Tool: {t.tool_name}, Confidence: {t.confidence:.0%}")
-                params_str = t.tool_parameters[:200] if t.tool_parameters else ""
+                params_str = (t.tool_parameters or "")[:200]
                 lines.append(f"  Parameters: {params_str}")
 
         # Recovery Patterns section

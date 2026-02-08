@@ -88,17 +88,17 @@ class InsightAggregator:
             # Find best performing tool
             best = max(
                 stats,
-                key=lambda s: s["successes"] / max(s["successes"] + s["failures"], 1),
+                key=lambda s: s.get("successes", 0) / max(s.get("successes", 0) + s.get("failures", 0), 1),
             )
 
-            success_rate = best["successes"] / max(
-                best["successes"] + best["failures"], 1
+            success_rate = best.get("successes", 0) / max(
+                best.get("successes", 0) + best.get("failures", 0), 1
             )
 
             logger.debug(
                 "Best tool identified for intent",
                 query_type=query_type,
-                tool=best["tool"],
+                tool=best.get("tool", "unknown"),
                 success_rate=success_rate,
             )
 
@@ -107,13 +107,13 @@ class InsightAggregator:
                 insight_type="tool_preference",
                 insight_key=query_type,
                 insight_value=json.dumps({
-                    "preferred_tool": best["tool"],
+                    "preferred_tool": best.get("tool", "unknown"),
                     "success_rate": round(success_rate, 3),
                     "avg_time_ms": best.get("avg_time", 0),
                     "all_tools": stats,
                 }),
                 sample_size=sum(
-                    s["successes"] + s["failures"] for s in stats
+                    s.get("successes", 0) + s.get("failures", 0) for s in stats
                 ),
                 confidence=success_rate,
             )

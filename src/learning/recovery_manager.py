@@ -157,9 +157,13 @@ class RecoveryManager:
                 fingerprint=fingerprint,
                 confidence=pattern.confidence,
             )
+            try:
+                recovery_params = json.loads(pattern.recovery_parameters) if pattern.recovery_parameters else {}
+            except (json.JSONDecodeError, TypeError):
+                recovery_params = {}
             return {
                 "recovery_tool": pattern.recovery_tool_name,
-                "recovery_params": json.loads(pattern.recovery_parameters),
+                "recovery_params": recovery_params,
                 "description": pattern.recovery_description,
                 "confidence": pattern.confidence,
             }
