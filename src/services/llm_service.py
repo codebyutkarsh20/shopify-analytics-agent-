@@ -533,9 +533,11 @@ class LLMService(ABC):
             "name": "generate_chart",
             "description": (
                 "Generate a chart image that appears INLINE in your Telegram response. "
+                "ONLY call this tool when: (1) the user explicitly requests a chart/graph/visualization, "
+                "OR (2) the data has 3+ comparison points and a chart clearly adds value. "
+                "Do NOT call this tool if the user said 'no chart', 'text only', 'brief', or 'just the number'. "
                 "After calling this tool, you MUST write [CHART:N] (where N is the chart_index from the result) "
                 "on its own line in your response, at the exact position you want the image to appear. "
-                "Write intro/context text ABOVE the marker, and analysis/insight text BELOW it. "
                 "Chart types: 'bar' for comparisons, 'line' for time trends, "
                 "'pie' for distribution, 'horizontal_bar' for ranked lists."
             ),
@@ -981,7 +983,12 @@ class LLMService(ABC):
                     "   - Query data first, then call generate_chart with extracted labels and values",
                     "   - Chart types: 'bar' (comparisons), 'line' (trends), 'pie' (distribution), 'horizontal_bar' (ranked lists)",
                     "",
-                    "CHART INLINE PLACEMENT — MANDATORY RULES:",
+                    "WHEN TO GENERATE CHARTS:",
+                    "- GENERATE a chart when: user explicitly asks ('show chart', 'graph', 'visualize'), or data has 3+ comparison points and visual adds value",
+                    "- DO NOT generate a chart when: user says 'no chart'/'text only'/'brief'/'just the number', or it's a simple single-number answer",
+                    "- When in doubt: skip the chart for simple queries, generate for complex multi-point data",
+                    "",
+                    "CHART INLINE PLACEMENT — MANDATORY RULES (only when you DO generate a chart):",
                     "",
                     "After calling generate_chart, the result gives you a chart_index (0, 1, 2, ...).",
                     "You MUST write [CHART:N] on its own line in your final response to place the image.",
@@ -1056,7 +1063,43 @@ class LLMService(ABC):
 
             system_parts.extend([
                 "",
-                "ANALYSIS GUIDELINES:",
+                "USER INSTRUCTION FOLLOWING — ADAPT TO EACH MESSAGE:",
+                "",
+                "You MUST respect per-message formatting instructions from the user.",
+                "The user's explicit instructions ALWAYS override your default behavior.",
+                "Scan each message for these cues and adapt accordingly:",
+                "",
+                "FORMAT LENGTH CUES:",
+                "- 'brief', 'short', 'quick', 'just tell me', 'one line', 'summary' → Keep answer to 1-3 sentences. No lists, no charts, just the key number(s).",
+                "- 'detailed', 'elaborate', 'explain', 'break down', 'in depth', 'full analysis' → Give comprehensive analysis with breakdowns, comparisons, and insights.",
+                "- 'just the number', 'just numbers', 'how much', 'how many' (without elaboration request) → Reply with ONLY the number/stat. Example: '₹67,364.78' or '11 orders'.",
+                "",
+                "CHART / VISUAL CUES:",
+                "- 'chart', 'graph', 'visualize', 'plot', 'show me a chart' → Generate a chart using the generate_chart tool.",
+                "- 'no chart', 'without chart', 'text only', 'no graph', 'skip the chart' → Do NOT generate any chart. Respond with text only.",
+                "- If the user does not mention charts at all → Use your judgment: generate a chart only when data has 3+ comparison points AND visual representation clearly adds value. For simple single-number answers, NEVER generate a chart.",
+                "",
+                "COMPARISON / FORMAT CUES:",
+                "- 'compare', 'versus', 'vs', 'side by side' → Show data in a structured comparison format.",
+                "- 'list', 'rank', 'top N' → Use numbered list format.",
+                "- 'table' → Format as a clean text table (use fixed-width formatting).",
+                "",
+                "EXAMPLES OF CORRECT ADAPTATION:",
+                "  User: 'how many orders today?' → '11 orders today totaling ₹67,364.78'  (brief by default for simple questions)",
+                "  User: 'how many orders today? give me details' → Full breakdown with each order, amounts, statuses, trends",
+                "  User: 'show revenue with a chart' → Query data + generate chart + brief text around it",
+                "  User: 'show revenue, no chart' → Query data + text-only response with numbers",
+                "  User: 'just the total revenue this month' → '₹2,45,678.90'  (just the number)",
+                "",
+                "IMPORTANT: When in doubt about length/format, match the complexity of the user's question.",
+                "Simple questions get simple answers. Complex questions get detailed answers.",
+                "NEVER give a 10-line response to 'how many orders today?' unless the user asks for details.",
+                "",
+            ])
+
+            system_parts.extend([
+                "",
+                "ANALYSIS GUIDELINES (apply when user asks for analysis or detailed responses):",
                 "- Always include specific numbers: revenue, order count, AOV, units sold",
                 "- Explain what the numbers mean in plain language",
                 "- Highlight notable trends, outliers, or changes worth attention",
@@ -1099,6 +1142,65 @@ class LLMService(ABC):
             logger.error("Failed to build system prompt", user_id=user_id, error=str(e))
             return "You are a Shopify Analytics Assistant. Help the merchant analyze their store data."
 
+    @staticmethod
+    def _detect_format_hints(message: str) -> Optional[str]:
+        """Detect per-message format/style instructions from the user's query.
+
+        Scans the message for explicit formatting cues (brief, chart, detailed, etc.)
+        and returns a compact directive string that gets injected alongside the message
+        so the LLM respects the user's real-time instructions.
+
+        Args:
+            message: The raw user message
+
+        Returns:
+            A directive string if format cues were found, otherwise None
+        """
+        msg_lower = message.lower()
+        directives = []
+
+        # Brevity / length cues
+        brevity_cues = ["brief", "short answer", "quick", "just tell me", "one line",
+                        "just the number", "just numbers", "just the total",
+                        "just the count", "only the number", "only the total",
+                        "just show number", "just show the number", "numbers only",
+                        "how much", "how many",
+                        "in short", "tldr", "tl;dr", "summary only",
+                        "no details", "no explanation", "simple answer",
+                        "without details", "without explanation"]
+        detail_cues = ["detailed", "elaborate", "explain", "break down", "in depth",
+                       "full analysis", "comprehensive", "deep dive", "thorough"]
+
+        if any(cue in msg_lower for cue in brevity_cues):
+            directives.append("BRIEF — keep response to 1-3 sentences, just key numbers")
+        elif any(cue in msg_lower for cue in detail_cues):
+            directives.append("DETAILED — give comprehensive analysis with breakdowns")
+
+        # Chart cues
+        chart_positive = ["chart", "graph", "visualize", "plot", "show.*chart",
+                          "with chart", "with graph"]
+        chart_negative = ["no chart", "without chart", "text only", "no graph",
+                          "skip chart", "skip the chart", "don't.*chart",
+                          "no visual"]
+
+        if any(re.search(cue, msg_lower) for cue in chart_negative):
+            directives.append("NO CHART — respond with text only, do not generate any chart")
+        elif any(re.search(cue, msg_lower) for cue in chart_positive):
+            directives.append("CHART REQUESTED — generate a chart for this data")
+
+        # Comparison cues
+        if any(cue in msg_lower for cue in ["compare", "versus", "vs ", "side by side", "comparison"]):
+            directives.append("COMPARISON FORMAT — show data side-by-side")
+
+        # List/ranking cues
+        if any(re.search(cue, msg_lower) for cue in [r"top \d+", "rank", "ranking", "list them"]):
+            directives.append("LIST/RANKING FORMAT — use numbered list")
+
+        if not directives:
+            return None
+
+        return " | ".join(directives)
+
     def _build_messages(
         self, user_id: int, message: str, session_id: int = None
     ) -> List[Dict[str, Any]]:
@@ -1132,7 +1234,15 @@ class LLMService(ABC):
                 messages.append({"role": "user", "content": conv.message})
                 messages.append({"role": "assistant", "content": conv.response})
 
-            messages.append({"role": "user", "content": message})
+            # Detect format hints from the current message and inject as a directive
+            format_hint = self._detect_format_hints(message)
+            if format_hint:
+                # Prepend format directive so LLM sees it right before the actual question
+                message_with_hint = f"[FORMAT: {format_hint}]\n\n{message}"
+                messages.append({"role": "user", "content": message_with_hint})
+                logger.debug("Format hints detected", hints=format_hint)
+            else:
+                messages.append({"role": "user", "content": message})
 
             # Inject a data-freshness reminder if conversation history is present
             # This prevents the LLM from reusing stale/wrong data from earlier turns
