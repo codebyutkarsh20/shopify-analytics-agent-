@@ -223,6 +223,21 @@ class MessageHandler:
 
             # Step 2: Classify intent
             intent = self.pattern_learner.classify_intent(message_text)
+            
+            # Smart Intent Refinement: Use LLM if intent is ambiguous ("general")
+            # or if query seems complex
+            if intent.coarse == "general" or self.pattern_learner.assess_query_complexity(message_text) == "complex":
+                logger.info("Refining intent with LLM", initial_intent=intent.coarse)
+                try:
+                    refined_intent = await self.pattern_learner.refine_intent_with_llm(
+                        message_text, self.claude_service
+                    )
+                    if refined_intent:
+                        intent = refined_intent
+                        logger.info("Intent refined", new_intent=intent.coarse, fine=intent.fine)
+                except Exception as e:
+                    logger.warning("Intent refinement failed, continuing with original", error=str(e))
+
             query_type = intent.coarse
             logger.debug(
                 "Intent classified",
@@ -279,10 +294,17 @@ class MessageHandler:
 
             # Step 6: Process message through Claude service (session-aware)
             logger.debug("Processing message through Claude", user_id=user.id)
+            
+            # Note: We are passing the intent object (Intent class) to the service, 
+            # but the service expects a string or similar in `process_message`.
+            # Let's pass the fine-grained intent string as before, but ensure the service uses it.
+            # Ideally, we should pass the whole intent object if the service supports it, 
+            # OR pass the refined intent string.
+            
             response = await self.claude_service.process_message(
                 user_id=user.id,
                 message=message_text,
-                intent=intent.fine,
+                intent=intent,  # Passing the full intent object allows explicit access to coarse/fine
                 session_id=session_id,
             )
             logger.debug(

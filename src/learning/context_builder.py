@@ -31,11 +31,12 @@ class ContextBuilder:
         self.db_ops = db_ops
         logger.info("ContextBuilder initialized")
 
-    def build_context(self, user_id: int) -> dict:
+    def build_context(self, user_id: int, current_query_type: Optional[str] = None) -> dict:
         """Build a complete context dictionary for Claude's system prompt.
 
         Args:
             user_id: The user ID
+            current_query_type: Optional current query type to prioritize relevant context
 
         Returns:
             Dictionary containing:
@@ -46,9 +47,10 @@ class ContextBuilder:
                 - query_type_distribution: Distribution of query types
                 - user_preferences: All stored user preferences
         """
-        logger.info("Building context", user_id=user_id)
+        logger.info("Building context", user_id=user_id, query_type=current_query_type)
 
         # Get favorite metrics (top 3)
+        # TODO: Filter by query type if we had that mapping. For now, get global top.
         metric_patterns = self.db_ops.get_top_patterns(
             user_id, pattern_type="metric", limit=3
         )
@@ -61,7 +63,26 @@ class ContextBuilder:
         preferred_time_ranges = [item.pattern_value for item in time_range_patterns]
 
         # Get recent queries/conversations (last 5)
-        recent_conversations = self.db_ops.get_recent_conversations(user_id, limit=5)
+        # If we have a current query type, prioritize recent queries of THAT type
+        if current_query_type:
+            # Fetch specifically for this type first
+            same_type_convs = self.db_ops.get_conversations_by_type(
+                user_id, query_type=current_query_type, limit=3
+            )
+            # Fetch general recent to fill up to 5
+            general_convs = self.db_ops.get_recent_conversations(user_id, limit=5)
+            
+            # Merge and deduplicate, preserving order (same_type first)
+            seen_ids = set()
+            recent_conversations = []
+            for c in same_type_convs + general_convs:
+                if c.id not in seen_ids:
+                    recent_conversations.append(c)
+                    seen_ids.add(c.id)
+            recent_conversations = recent_conversations[:5]
+        else:
+            recent_conversations = self.db_ops.get_recent_conversations(user_id, limit=5)
+
         recent_queries = [
             {
                 "summary": conv.message[:100] if conv.message else "",
@@ -379,7 +400,7 @@ class ContextBuilder:
 
         return formatted
 
-    def get_quick_context(self, user_id: int) -> str:
+    def get_quick_context(self, user_id: int, current_query_type: Optional[str] = None) -> str:
         """Build and format context in one call.
 
         Convenience method that combines build_context() and
@@ -387,11 +408,12 @@ class ContextBuilder:
 
         Args:
             user_id: The user ID
+            current_query_type: Optional query type to prioritize
 
         Returns:
             Formatted context string ready for system prompt
         """
         logger.info("Getting quick context", user_id=user_id)
-        context = self.build_context(user_id)
+        context = self.build_context(user_id, current_query_type=current_query_type)
         formatted = self.format_context_for_prompt(context)
         return formatted

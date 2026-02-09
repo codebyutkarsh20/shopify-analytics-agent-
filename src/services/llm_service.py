@@ -172,6 +172,33 @@ class LLMService(ABC):
         """
         ...
 
+    async def get_classification(self, query: str, system_prompt: str) -> Optional[Dict[str, Any]]:
+        """Get a lightweight classification from the LLM.
+        
+        Args:
+            query: User query to classify
+            system_prompt: Instructions for classification
+            
+        Returns:
+            Dict containing classification results or None if failed
+        """
+        try:
+            messages = [{"role": "user", "content": f"Query: {query}"}]
+            # We use an empty list for tools to force a defined output or just text
+            # Some providers might need specific handling, but _call_api handles the protocol.
+            response = self._call_api(system_prompt, messages, tools=[])
+            
+            text, _ = self._parse_response(response)
+            
+            # extract JSON from text
+            json_match = re.search(r"\{.*\}", text, re.DOTALL)
+            if json_match:
+                return json.loads(json_match.group(0))
+            return None
+        except Exception as e:
+            logger.warning("Classification failed", error=str(e))
+            return None
+
     # ─── Shared logic (provider-agnostic) ──────────────────────────
 
     async def process_message(
@@ -209,9 +236,20 @@ class LLMService(ABC):
             self.last_chart_files = []
             session_key = f"{user_id}_{session_id or 'nosession'}"
 
+            # Determine query type for context prioritization
+            current_query_type = None
+            if intent:
+                if hasattr(intent, 'coarse'):
+                    current_query_type = intent.coarse
+                elif isinstance(intent, str):
+                    # Fallback if a string was passed (old behavior or fine-grained only)
+                    # We might not know coarse type easily unless we parse it or passed it differently.
+                    # For now, let's assume if it's a string, it might be the coarse one or just ignore.
+                    current_query_type = intent
+
             # Build conversation history and system prompt
             messages = self._build_messages(user_id, message, session_id)
-            system_prompt = self._build_system_prompt(user_id)
+            system_prompt = self._build_system_prompt(user_id, current_query_type)
 
             # Get tools in provider format
             base_tools = self._get_base_tool_definitions()
@@ -771,7 +809,7 @@ class LLMService(ABC):
             ),
         })
 
-    def _build_system_prompt(self, user_id: int) -> str:
+    def _build_system_prompt(self, user_id: int, query_type: Optional[str] = None) -> str:
         """Build the system prompt with context, tool guidance, and formatting rules."""
         try:
             # Pre-compute UTC date boundaries so the LLM doesn't need timezone math
@@ -798,6 +836,35 @@ class LLMService(ABC):
 
             # Format UTC timestamps for Shopify query filters
             utc_fmt = "%Y-%m-%dT%H:%M:%SZ"
+            
+            # Chain of Thought & Intelligence Enhancements
+            reasoning_instruction = (
+                "\n\nIMPORTANT: BEFORE calling any tools, you must perform a 'Chain of Thought' reasoning step.\n"
+                "1. Analyze the user's intent: Is it a simple lookup, a comparison, or a complex analysis?\n"
+                "2. Identify the time range: Convert relative terms (today, last week) to specific UTC ISO-8601 timestamps.\n"
+                "   - Current IST time: {now_ist}\n"
+                "   - 'Today' starts at: {today_utc} (UTC)\n"
+                "   - 'Yesterday' is: {yesterday_start_utc} to {yesterday_end_utc} (UTC)\n"
+                "   - 'Last 7 Days' includes data since: {week_ago_utc} (UTC)\n"
+                "   - 'Last 30 Days' includes data since: {month_ago_utc} (UTC)\n"
+                "3. Check for specific filters: Status, Tags, Fulfillment, etc.\n"
+                "4. Choose the best tool: Use 'shopify_analytics' for standard queries, 'shopify_graphql' ONLY for complex nested data.\n"
+                "5. Formulate the query parameters carefully.\n"
+            ).format(
+                now_ist=now_ist_aware.strftime("%Y-%m-%d %H:%M:%S %Z"),
+                today_utc=today_start_utc.strftime(utc_fmt),
+                yesterday_start_utc=yesterday_start_utc.strftime(utc_fmt),
+                yesterday_end_utc=yesterday_end_utc.strftime(utc_fmt),
+                week_ago_utc=week_ago_utc.strftime(utc_fmt),
+                month_ago_utc=month_ago_utc.strftime(utc_fmt),
+            )
+
+            prompt = (
+                f"You are the Shopify Analytics Agent, an intelligent assistant for store owners.\n"
+                f"Current Time (IST): {now_ist_aware.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"{reasoning_instruction}\n"
+                f"You have access to the following tools to fetch data directly from Shopify:\n"
+            )
             today_start_utc_str = today_start_utc.strftime(utc_fmt)
             yesterday_start_utc_str = yesterday_start_utc.strftime(utc_fmt)
             yesterday_end_utc_str = yesterday_end_utc.strftime(utc_fmt)

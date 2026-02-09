@@ -243,6 +243,38 @@ class DatabaseOperations:
         finally:
             session.close()
 
+    def get_conversations_by_type(self, user_id: int, query_type: str, limit: int = 5) -> List[Any]:
+        """Get recent conversations filtered by query type.
+
+        Args:
+            user_id: Telegram user ID
+            query_type: specific query type to filter by
+            limit: max number of conversations to return
+
+        Returns:
+            List of Conversation objects
+        """
+        session = self.get_session()
+        try:
+            stmt = (
+                select(Conversation)
+                .where(
+                    and_(
+                        Conversation.user_id == user_id,
+                        Conversation.query_type == query_type,
+                    )
+                )
+                .order_by(Conversation.created_at.desc())
+                .limit(limit)
+            )
+            return session.execute(stmt).scalars().all()
+        except Exception as e:
+            # logger not globally available here unless imported, assuming it's not or using print for now
+            # Actually, let's just return empty list on error for safety
+            return []
+        finally:
+            session.close()
+
     def increment_user_interaction(self, user_id: int) -> None:
         """
         Increment interaction count for a user.

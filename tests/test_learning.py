@@ -212,14 +212,9 @@ class TestContextBuilder:
         # which will fail since they are SQLAlchemy models. This test verifies the structure
         # that should be returned. In a real implementation, items would need to be converted
         # to attributes or dicts first.
-        try:
-            context = builder.build_context(sample_user.id)
-            # If the implementation is fixed, this would work
-            assert "revenue" in context["favorite_metrics"]
-            assert "last_7_days" in context["preferred_time_ranges"]
-        except TypeError as e:
-            # Current implementation bug - verify it's the expected error
-            assert "subscriptable" in str(e)
+        context = builder.build_context(sample_user.id)
+        assert "revenue" in context["favorite_metrics"]
+        assert "last_7_days" in context["preferred_time_ranges"]
 
     def test_format_context_for_prompt(self, db_ops, sample_user):
         """Test formatting context into readable string for system prompt.
@@ -279,20 +274,15 @@ class TestPreferenceManager:
         """
         manager = PreferenceManager(db_ops)
 
-        try:
-            manager.set_manual_preference(
-                sample_user.id,
-                "preferred_time_range",
-                "last_30_days"
-            )
-            # If the bug is fixed, verify preference was set
-            pref = db_ops.get_preference(sample_user.id, "preferred_time_range")
-            assert pref is not None
-            assert pref.preference_value == "last_30_days"
-            assert pref.confidence_score == 1.0
-        except TypeError as e:
-            # Current implementation bug - verify it's the expected error
-            assert "preference_key" in str(e) or "key" in str(e)
+        manager.set_manual_preference(
+            sample_user.id,
+            "preferred_time_range",
+            "last_30_days"
+        )
+        pref = db_ops.get_preference(sample_user.id, "preferred_time_range")
+        assert pref is not None
+        assert pref.preference_value == "last_30_days"
+        assert pref.confidence_score == 1.0
 
     def test_update_preferences_from_patterns(self, db_ops, sample_user):
         """Test auto-updating preferences from stored patterns.
@@ -311,16 +301,14 @@ class TestPreferenceManager:
 
         manager = PreferenceManager(db_ops, pattern_threshold=5)
 
-        try:
-            manager.update_preferences_from_patterns(sample_user.id)
-            # If fixed, preferences should be created
-            metric_pref = db_ops.get_preference(sample_user.id, "favorite_metric")
-            time_pref = db_ops.get_preference(sample_user.id, "preferred_time_range")
-            assert metric_pref is not None
-            assert metric_pref.preference_value == "revenue"
-        except TypeError as e:
-            # Current implementation bug - verify it's the expected error
-            assert "subscriptable" in str(e)
+        manager.update_preferences_from_patterns(sample_user.id)
+        
+        # Verify preferences created
+        metric_pref = db_ops.get_preference(sample_user.id, "favorite_metric")
+        # time_pref = db_ops.get_preference(sample_user.id, "preferred_time_range")
+        
+        assert metric_pref is not None
+        assert metric_pref.preference_value == "revenue"
 
     def test_get_user_profile(self, db_ops, sample_user):
         """Test getting comprehensive user profile.

@@ -267,6 +267,57 @@ class PatternLearner:
             parts.append("comparison")
         return "_".join(parts)
 
+    async def refine_intent_with_llm(self, query: str, llm_service) -> Intent:
+        """Refine intent classification using the LLM for ambiguous queries.
+        
+        Args:
+            query: The user query string
+            llm_service: The LLM service instance to use for classification
+            
+        Returns:
+            Intent object with refined coarse and fine classifications
+        """
+        try:
+            # Construct a classification prompt
+            system_prompt = (
+                "You are an expert intent classifier for a Shopify Analytics bot. "
+                "Classify the user's query into one of these categories:\n"
+                "- revenue (sales, income, earnings)\n"
+                "- orders (order volume, count)\n"
+                "- products (top products, inventory, best sellers)\n"
+                "- customers (new vs repeat, top spenders)\n"
+                "- comparison (comparing two periods)\n"
+                "- general (if none fit perfectly)\n\n"
+                "Also generate a specific 'fine' intent string like 'revenue_growth_last_30_days'.\n"
+                "Return JSON only: {\"coarse\": \"...\", \"fine\": \"...\"}"
+            )
+            
+            # Create a lightweight message for the LLM
+            messages = [{"role": "user", "content": f"Classify this query: '{query}'"}]
+            
+            # Call LLM (using a specialized method if available, or standard process)
+            # We'll use the service's direct API call if exposed, or process_message loosely.
+            # Assuming llm_service has a method to get a quick completion or we use internal methods.
+            # Since _call_api is abstract/internal, we might need a public helper on LLMService.
+            # For now, let's assume we can use a helper or the public process_message is too heavy.
+            # Let's rely on `llm_service.get_chat_completion` if we add it, or use `process_message` 
+            # with a special system prompt override if supported.
+            
+            # BETTER APPROACH: The LLMService should expose a `classify` method.
+            # But since I can't easily change LLMService interface across all providers right now without bigger refactor,
+            # I will assume `llm_service` has a `get_classification` method which I will add next.
+            
+            response = await llm_service.get_classification(query, system_prompt)
+            
+            if response and "coarse" in response:
+                return Intent(coarse=response["coarse"], fine=response.get("fine", response["coarse"]))
+                
+        except Exception as e:
+            logger.warning(f"LLM intent refinement failed: {e}")
+        
+        # Fallback to regex
+        return self.classify_intent(query)
+
     def assess_query_complexity(self, query: str) -> str:
         """Assess the complexity of a query.
 

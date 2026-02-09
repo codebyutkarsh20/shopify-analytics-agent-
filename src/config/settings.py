@@ -34,7 +34,7 @@ class TelegramConfig:
 @dataclass
 class AnthropicConfig:
     api_key: str = ""
-    model: str = "claude-sonnet-4-5-20250929"
+    model: str = "claude-3-5-sonnet-latest"
     max_tokens: int = 4000
 
     def __post_init__(self):
