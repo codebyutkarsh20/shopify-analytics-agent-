@@ -2590,12 +2590,30 @@ class DatabaseOperations:
                 .values(user_id=keep_user_id)
             )
 
-            # Query patterns
-            session.execute(
-                QueryPattern.__table__.update()
-                .where(QueryPattern.user_id == merge_user_id)
-                .values(user_id=keep_user_id)
-            )
+            # Query patterns (handle potential key conflicts)
+            merge_patterns = session.execute(
+                select(QueryPattern).where(QueryPattern.user_id == merge_user_id)
+            ).scalars().all()
+            
+            for pattern in merge_patterns:
+                existing = session.execute(
+                    select(QueryPattern).where(
+                        and_(
+                            QueryPattern.user_id == keep_user_id,
+                            QueryPattern.pattern_type == pattern.pattern_type,
+                            QueryPattern.pattern_value == pattern.pattern_value,
+                        )
+                    )
+                ).scalar_one_or_none()
+                
+                if existing:
+                    # Merge frequencies and advance last_used
+                    existing.frequency += pattern.frequency
+                    if pattern.last_used > existing.last_used:
+                        existing.last_used = pattern.last_used
+                    session.delete(pattern)
+                else:
+                    pattern.user_id = keep_user_id
 
             # User preferences (handle potential key conflicts)
             merge_prefs = session.execute(
