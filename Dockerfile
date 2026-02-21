@@ -28,7 +28,7 @@ FROM python:3.12-slim AS production
 
 # Labels
 LABEL maintainer="Shopify Analytics Agent"
-LABEL description="Telegram bot for Shopify analytics with multi-LLM support"
+LABEL description="Telegram + WhatsApp bot for Shopify analytics with multi-LLM support"
 
 # Security: run as non-root user
 RUN groupadd -r botuser && useradd -r -g botuser -d /app -s /sbin/nologin botuser
@@ -54,6 +54,9 @@ RUN mkdir -p /app/data /app/logs && \
 
 # Switch to non-root user
 USER botuser
+
+# Expose WhatsApp webhook port (only used if WHATSAPP_ENABLED=true)
+EXPOSE 8080
 
 # Health check: verify the Python process is alive
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \

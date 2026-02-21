@@ -191,14 +191,17 @@ SEED_TEMPLATES = [
 ]
 
 
-def seed_templates(db_ops) -> None:
+def seed_templates(db_ops, vector_store=None) -> None:
     """Insert seed templates if they don't already exist.
 
     Iterates through SEED_TEMPLATES and creates database entries for any
     that don't already exist (checked by intent_category + tool_name combo).
+    If a ``vector_store`` is provided, embeddings are computed for every
+    newly created template.
 
     Args:
         db_ops: DatabaseOperations instance
+        vector_store: Optional EmbeddingStore for embedding new seeds.
     """
     logger.info("Starting template seeding")
 
@@ -224,6 +227,29 @@ def seed_templates(db_ops) -> None:
                 example_queries=tpl["example_queries"],
             )
             count += 1
+
+            # Embed the newly created seed template
+            if vector_store:
+                try:
+                    created = db_ops.find_template(
+                        intent_category=tpl["intent_category"],
+                        tool_name=tpl["tool_name"],
+                    )
+                    if created:
+                        from src.learning.vector_store import EmbeddingStore
+
+                        embed_text = EmbeddingStore._build_template_embed_text(created)
+                        vector_store.store_embedding(
+                            entity_type="template",
+                            entity_id=created.id,
+                            text=embed_text,
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to embed seed template %s: %s",
+                        tpl["intent_category"],
+                        exc,
+                    )
 
     if count:
         logger.info(

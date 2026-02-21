@@ -20,6 +20,9 @@ httpx==0.25.2
 pandas==2.1.4
 numpy==1.26.4
 
+# Semantic search (vector embeddings for template matching)
+sentence-transformers==3.3.0
+
 # Chart generation
 matplotlib==3.8.2
 

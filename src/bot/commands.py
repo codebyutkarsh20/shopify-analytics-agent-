@@ -35,9 +35,11 @@ class BotCommands:
         self,
         db_ops: DatabaseOperations,
         preference_manager: PreferenceManager,
+        channel_linker=None,
     ):
         self.db_ops = db_ops
         self.preference_manager = preference_manager
+        self.channel_linker = channel_linker
         self._bot_access_code = settings.security.bot_access_code
         logger.info("BotCommands initialized")
 
@@ -570,5 +572,80 @@ class BotCommands:
             await update.message.reply_text(
                 "❌ <b>Invalid access code.</b>\n\n"
                 "Please check the code and try again, or contact the bot administrator.",
+                parse_mode=PARSE_MODE,
+            )
+
+    # ── /link command ──────────────────────────────────────────────
+
+    async def link_command(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """Handle /link command for cross-channel account linking.
+
+        Usage:
+          /link           → Generate a linking code (to use on WhatsApp)
+          /link <code>    → Redeem a code generated on WhatsApp
+        """
+        telegram_user_id = update.effective_user.id
+        logger.info("Link command received", user_id=telegram_user_id)
+
+        # Gate: access-code verification
+        if await self._require_verification(update):
+            return
+
+        if not self.channel_linker:
+            await update.message.reply_text(
+                "ℹ️ Cross-channel linking is not enabled. "
+                "Set <code>WHATSAPP_ENABLED=true</code> to use this feature.",
+                parse_mode=PARSE_MODE,
+            )
+            return
+
+        user = self.db_ops.get_or_create_user(
+            telegram_user_id=telegram_user_id,
+            telegram_username=update.effective_user.username,
+            first_name=update.effective_user.first_name,
+        )
+
+        # Check if already linked
+        already_msg = self.channel_linker.check_already_linked(user.id)
+        if already_msg:
+            await update.message.reply_text(
+                f"✅ {escape(already_msg)}",
+                parse_mode=PARSE_MODE,
+            )
+            return
+
+        args = context.args  # Words after /link
+        if args:
+            # Redeeming a code generated on WhatsApp
+            code = args[0].strip()
+            success, message = self.channel_linker.redeem_link_code(
+                code=code,
+                target_channel="telegram",
+                target_user_id=user.id,
+                target_channel_id=str(telegram_user_id),
+            )
+            emoji = "✅" if success else "❌"
+            await update.message.reply_text(
+                f"{emoji} {escape(message)}",
+                parse_mode=PARSE_MODE,
+            )
+        else:
+            # Generating a code to use on WhatsApp
+            code = self.channel_linker.generate_link_code(
+                user_id=user.id,
+                source_channel="telegram",
+                source_channel_id=str(telegram_user_id),
+            )
+            await update.message.reply_text(
+                f"🔗 <b>Account Linking Code</b>\n\n"
+                f"Your linking code is: <code>{code}</code>\n\n"
+                f"Send this on WhatsApp within 10 minutes:\n"
+                f"<code>link {code}</code>\n\n"
+                f"This will merge your Telegram and WhatsApp accounts "
+                f"so you share the same history, preferences, and store connections.",
                 parse_mode=PARSE_MODE,
             )

@@ -20,14 +20,17 @@ class TemplateManager:
     Uses success/failure counts and execution time to rank templates.
     """
 
-    def __init__(self, db_ops):
+    def __init__(self, db_ops, vector_store=None):
         """Initialize TemplateManager.
 
         Args:
             db_ops: DatabaseOperations instance
+            vector_store: Optional EmbeddingStore for semantic search.
+                          If None, embedding is skipped (keyword-only mode).
         """
         self.db_ops = db_ops
-        logger.info("TemplateManager initialized")
+        self.vector_store = vector_store
+        logger.info("TemplateManager initialized", vector_search=vector_store is not None)
 
     def record_successful_query(
         self,
@@ -93,6 +96,9 @@ class TemplateManager:
                 example_queries=json.dumps([user_message[:200]]),
                 confidence=0.8,
             )
+
+        # Step 4: Store / update embedding for semantic search
+        self._update_template_embedding(intent_category, tool_name)
 
     def record_failed_query(
         self,
@@ -244,3 +250,38 @@ class TemplateManager:
             Description string
         """
         return f"Query using {tool_name}: {user_message[:100]}"
+
+    def _update_template_embedding(
+        self,
+        intent_category: str,
+        tool_name: str,
+    ) -> None:
+        """Compute and store an embedding for the given template.
+
+        Non-fatal: logs a warning and returns silently on any failure.
+        """
+        if not self.vector_store:
+            return
+
+        try:
+            template = self.db_ops.find_template(
+                intent_category=intent_category,
+                tool_name=tool_name,
+            )
+            if not template:
+                return
+
+            from src.learning.vector_store import EmbeddingStore
+
+            embed_text = EmbeddingStore._build_template_embed_text(template)
+            self.vector_store.store_embedding(
+                entity_type="template",
+                entity_id=template.id,
+                text=embed_text,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to update template embedding",
+                intent_category=intent_category,
+                error=str(exc),
+            )

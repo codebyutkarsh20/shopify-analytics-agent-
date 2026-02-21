@@ -22,21 +22,29 @@ class ContextBuilder:
     in Claude's system prompt for personalized responses.
     """
 
-    def __init__(self, db_ops):
+    def __init__(self, db_ops, vector_store=None):
         """Initialize ContextBuilder.
 
         Args:
             db_ops: DatabaseOperations instance for retrieving user data.
+            vector_store: Optional EmbeddingStore for semantic template search.
         """
         self.db_ops = db_ops
-        logger.info("ContextBuilder initialized")
+        self.vector_store = vector_store
+        logger.info("ContextBuilder initialized", vector_search=vector_store is not None)
 
-    def build_context(self, user_id: int, current_query_type: Optional[str] = None) -> dict:
+    def build_context(
+        self,
+        user_id: int,
+        current_query_type: Optional[str] = None,
+        current_query_text: Optional[str] = None,
+    ) -> dict:
         """Build a complete context dictionary for Claude's system prompt.
 
         Args:
             user_id: The user ID
             current_query_type: Optional current query type to prioritize relevant context
+            current_query_text: Optional raw user message for semantic template search
 
         Returns:
             Dictionary containing:
@@ -132,8 +140,10 @@ class ContextBuilder:
         # Get recent query errors for learning context
         past_errors = self._build_error_context()
 
-        # Get query templates relevant to user's patterns
-        recommended_templates = self._get_relevant_templates(user_id)
+        # Get query templates relevant to user's patterns (keyword + vector search)
+        recommended_templates = self._get_relevant_templates(
+            user_id, current_query_text=current_query_text
+        )
 
         # Get error recovery patterns
         recovery_patterns = self._get_recovery_patterns()
@@ -168,30 +178,102 @@ class ContextBuilder:
 
         return context
 
-    def _get_relevant_templates(self, user_id: int, limit: int = 5) -> list:
+    def _get_relevant_templates(
+        self,
+        user_id: int,
+        limit: int = 5,
+        current_query_text: Optional[str] = None,
+    ) -> list:
         """Get query templates relevant to this user's common intents.
+
+        Uses two strategies and merges results:
+          1. **Keyword match** — exact intent_category lookup from user's
+             top patterns (existing behaviour).
+          2. **Vector search** — semantic similarity between the current
+             user query and stored template embeddings (new).
+
+        Keyword matches take priority; vector matches fill the remaining
+        slots.  Duplicates are removed by template ID.
 
         Args:
             user_id: The user ID
             limit: Maximum number of templates to return
+            current_query_text: Optional raw user query for vector search
 
         Returns:
             List of template objects matching user's common intents
         """
+        templates = []
+        seen_ids: set = set()
+
+        # --- Strategy 1: keyword / exact-intent match (existing) ---
         try:
             top_intents = self.db_ops.get_top_patterns(
                 user_id, pattern_type="intent", limit=3
             )
-            templates = []
             for intent_pattern in top_intents:
                 matching = self.db_ops.get_templates_by_intent(
                     intent_pattern.pattern_value, min_confidence=0.7, limit=2
                 )
-                templates.extend(matching)
-            return templates[:limit]
+                for tpl in matching:
+                    if tpl.id not in seen_ids:
+                        templates.append(tpl)
+                        seen_ids.add(tpl.id)
         except Exception as e:
-            logger.warning("Failed to get relevant templates", error=str(e))
-            return []
+            logger.warning("Keyword template lookup failed", error=str(e))
+
+        # --- Strategy 2: vector / semantic search (new) ---
+        if self.vector_store and current_query_text and len(templates) < limit:
+            try:
+                remaining = limit - len(templates)
+                vector_matches = self.vector_store.search_similar(
+                    query_text=current_query_text,
+                    entity_type="template",
+                    top_k=remaining + 2,  # fetch a few extra for dedup
+                    min_similarity=0.4,
+                )
+
+                if vector_matches:
+                    # Resolve entity IDs to full QueryTemplate objects
+                    from src.database.models import QueryTemplate
+
+                    match_ids = [
+                        m["entity_id"]
+                        for m in vector_matches
+                        if m["entity_id"] not in seen_ids
+                    ]
+                    if match_ids:
+                        session = self.db_ops.get_session()
+                        try:
+                            from sqlalchemy import select
+                            stmt = (
+                                select(QueryTemplate)
+                                .where(QueryTemplate.id.in_(match_ids))
+                                .where(QueryTemplate.confidence >= 0.5)
+                            )
+                            vector_templates = session.execute(stmt).scalars().all()
+
+                            # Preserve similarity order
+                            id_order = {mid: idx for idx, mid in enumerate(match_ids)}
+                            vector_templates.sort(
+                                key=lambda t: id_order.get(t.id, 999)
+                            )
+
+                            for tpl in vector_templates:
+                                if tpl.id not in seen_ids:
+                                    templates.append(tpl)
+                                    seen_ids.add(tpl.id)
+                        finally:
+                            session.close()
+
+                    logger.debug(
+                        "Vector search found %d extra templates",
+                        len(templates) - len(seen_ids - {t.id for t in templates}),
+                    )
+            except Exception as e:
+                logger.warning("Vector template search failed", error=str(e))
+
+        return templates[:limit]
 
     def _get_recovery_patterns(self, limit: int = 5) -> list:
         """Get most useful error recovery patterns.
@@ -400,7 +482,12 @@ class ContextBuilder:
 
         return formatted
 
-    def get_quick_context(self, user_id: int, current_query_type: Optional[str] = None) -> str:
+    def get_quick_context(
+        self,
+        user_id: int,
+        current_query_type: Optional[str] = None,
+        current_query_text: Optional[str] = None,
+    ) -> str:
         """Build and format context in one call.
 
         Convenience method that combines build_context() and
@@ -409,11 +496,16 @@ class ContextBuilder:
         Args:
             user_id: The user ID
             current_query_type: Optional query type to prioritize
+            current_query_text: Optional raw user query for vector search
 
         Returns:
             Formatted context string ready for system prompt
         """
         logger.info("Getting quick context", user_id=user_id)
-        context = self.build_context(user_id, current_query_type=current_query_type)
+        context = self.build_context(
+            user_id,
+            current_query_type=current_query_type,
+            current_query_text=current_query_text,
+        )
         formatted = self.format_context_for_prompt(context)
         return formatted

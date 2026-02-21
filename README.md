@@ -11,6 +11,7 @@ A Python-based Shopify analytics agent with a Telegram bot interface, powered by
 - **Time-Based Comparisons** - Compare metrics across different time periods
 - **Direct GraphQL API** - Connects to Shopify's Admin GraphQL API directly (no MCP dependency)
 - **5-Layer Learning System** - Session memory, user memory, query knowledge, tool intelligence, and response quality tracking
+- **Semantic Vector Search** - SQLite-based sentence-transformers embeddings for template matching via cosine similarity (falls back to keyword matching if unavailable)
 - **Session Management** - Automatic session detection for single-thread chat platforms
 - **Error Recovery Learning** - Learns from failures and applies proven recovery strategies
 - **Channel-Agnostic Architecture** - Built for Telegram with WhatsApp support ready
@@ -202,9 +203,10 @@ MessageHandler (10-step pipeline)
     +---> FeedbackAnalyzer.analyze_follow_up()  [implicit quality feedback]
     +---> ClaudeService.process_message()       [Claude AI + GraphQL tools]
     |         |
-    |         +---> TemplateManager             [reuse proven queries]
+    |         +---> TemplateManager             [reuse proven queries + embed on success]
     |         +---> RecoveryManager              [auto-recover from errors]
-    |         +---> ContextBuilder               [rich learning context]
+    |         +---> ContextBuilder               [keyword + vector search for context]
+    |         |         +---> EmbeddingStore      [cosine similarity template retrieval]
     |
     +---> PatternLearner.learn_from_query()     [store patterns]
     +---> PreferenceManager                     [update preferences]
@@ -235,15 +237,43 @@ Every incoming message goes through 10 steps:
 
 **Layer 2: User Memory** - Per-user patterns, preferences, interaction history, and preferred metrics/time ranges.
 
-**Layer 3: Query Knowledge (Global)** - Successful GraphQL query templates indexed by intent. When a query succeeds, its tool+parameters are stored as a reusable template. Future similar intents get pre-built proven queries instead of constructing from scratch.
+**Layer 3: Query Knowledge (Global)** - Successful GraphQL query templates indexed by intent. When a query succeeds, its tool+parameters are stored as a reusable template. Future similar intents get pre-built proven queries instead of constructing from scratch. Templates are also embedded as 384-dimensional vectors using `all-MiniLM-L6-v2` (sentence-transformers) and stored as BLOBs in SQLite. At query time, a two-strategy retrieval runs: (1) exact keyword match on intent_category, then (2) cosine-similarity vector search against all template embeddings to catch paraphrased queries that mean the same thing. This ensures "show top selling items" and "which products made the most money" both find the same proven template.
 
 **Layer 4: Tool Intelligence (Global)** - Error recovery patterns with MD5 fingerprinting. When an error occurs and is later recovered, the error-to-recovery mapping is stored. Future identical errors can be auto-recovered.
 
 **Layer 5: Response Quality** - Implicit feedback detection from user follow-ups: "thanks" = positive (score: +0.8), "wrong" = negative (score: -0.8), corrections = feedback (-0.5), refinements = partial success (+0.5). Quality scores feed back into template confidence.
 
+### Semantic Vector Search Layer
+
+The template retrieval system uses a two-strategy approach to find relevant query templates:
+
+```
+User asks "which items are selling the best right now?"
+    |
+    v
+context_builder._get_relevant_templates()
+    |
+    +---> Strategy 1: Keyword/exact match on intent_category
+    |     (fast, precise — works when intent string matches exactly)
+    |
+    +---> Strategy 2: Vector similarity search
+    |     embed(user_query) → cosine similarity vs all template embeddings
+    |     → returns "products_ranking" template at 0.82 similarity
+    |
+    +---> Merge & deduplicate by template ID
+    |     (keyword matches take priority, vector fills remaining slots)
+    |
+    v
+Proven templates injected into system prompt
+```
+
+The `EmbeddingStore` class (`src/learning/vector_store.py`) handles the full lifecycle: lazy model loading on first query (so bot startup is instant), embedding computation via `all-MiniLM-L6-v2` (384-dim vectors), BLOB storage in SQLite's `embedding_vectors` table (1,536 bytes per vector), and brute-force cosine similarity search via numpy vectorized operations. If `sentence-transformers` is not installed or the model fails to load, the system gracefully degrades to keyword-only matching with zero disruption.
+
+Templates are embedded when created (by `TemplateManager` on successful queries) and seed templates are embedded on first boot (by `template_seeds.py`). A one-time backfill script (`scripts/backfill_embeddings.py`) can embed all existing templates that lack embeddings.
+
 ### Database Schema
 
-14 tables managed via SQLAlchemy 2.0 ORM:
+15 tables managed via SQLAlchemy 2.0 ORM:
 
 | Table | Purpose |
 |-------|---------|
@@ -261,6 +291,7 @@ Every incoming message goes through 10 steps:
 | `user_preferences` | Manual and learned user preferences |
 | `shopify_stores` | Connected Shopify store credentials |
 | `analytics_cache` | Cached analytics results |
+| `embedding_vectors` | Semantic embedding BLOBs for vector search (384-dim float32) |
 
 ## Project Structure
 
@@ -276,6 +307,9 @@ shopify-analytics-agent/
 ├── server-setup.sh                      # First-time server setup script
 ├── README.md                            # This file
 ├── MEMORY_SYSTEM_DESIGN.md              # Detailed learning system design doc
+│
+├── scripts/
+│   └── backfill_embeddings.py           # One-time script to embed all existing templates
 │
 ├── src/
 │   ├── bot/                             # Telegram bot layer
@@ -293,20 +327,21 @@ shopify-analytics-agent/
 │   │   ├── claude_service.py           # Backward-compat alias
 │   │   └── shopify_graphql.py          # Direct Shopify GraphQL client
 │   │
-│   ├── learning/                        # 5-layer learning system
+│   ├── learning/                        # 5-layer learning system + vector search
 │   │   ├── pattern_learner.py           # Intent classification + pattern detection
-│   │   ├── context_builder.py           # Rich context assembly (templates, recovery, insights)
+│   │   ├── context_builder.py           # Rich context assembly (keyword + vector search)
+│   │   ├── vector_store.py              # SQLite vector embeddings + cosine similarity search
 │   │   ├── preference_manager.py        # User preference management
 │   │   ├── session_manager.py           # Session lifecycle management
-│   │   ├── template_manager.py          # Query template learning
+│   │   ├── template_manager.py          # Query template learning + embedding on success
 │   │   ├── recovery_manager.py          # Error recovery pattern learning
 │   │   ├── feedback_analyzer.py         # Implicit feedback detection
 │   │   ├── insight_aggregator.py        # Cross-user intelligence aggregation
 │   │   └── template_seeds.py            # 10 seed templates for common queries
 │   │
 │   ├── database/                        # Data persistence
-│   │   ├── models.py                    # 14 SQLAlchemy ORM models
-│   │   ├── operations.py               # ~40 database operations
+│   │   ├── models.py                    # 15 SQLAlchemy ORM models (incl. EmbeddingVector)
+│   │   ├── operations.py               # ~43 database operations (incl. embedding CRUD)
 │   │   └── init_db.py                   # DB init, migration, and seeding
 │   │
 │   ├── config/                          # Configuration
@@ -343,7 +378,8 @@ pytest tests/ --cov=src
 - **Telegram:** `python-telegram-bot` 20.7 - Async Telegram bot framework
 - **AI:** Anthropic Claude or OpenAI GPT - Multi-LLM with tool calling
 - **Shopify:** Direct GraphQL API via `httpx` - No MCP dependency
-- **Database:** SQLAlchemy 2.0 + SQLite (WAL mode) - ORM with 14 tables
+- **Database:** SQLAlchemy 2.0 + SQLite (WAL mode) - ORM with 15 tables
+- **Vector Search:** `sentence-transformers` (all-MiniLM-L6-v2) - 384-dim embeddings stored as SQLite BLOBs, cosine similarity via numpy
 - **Async:** `aiohttp`, `asyncio`, `httpx` - Async HTTP and event loop
 - **Logging:** `structlog` - Structured JSON logging
 - **Deployment:** Docker + Docker Compose with auto-restart

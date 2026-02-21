@@ -22,6 +22,9 @@ from src.services.chart_generator import ChartGenerator
 from src.services.shopify_graphql import ShopifyGraphQLClient
 from src.utils.logger import get_logger
 from src.utils.timezone import now_ist, IST
+from src.services.tools.shopify_analytics import ShopifyAnalyticsTool
+from src.services.tools.shopify_graphql import ShopifyGraphQLTool
+from src.services.tools.chart_generator import ChartGeneratorTool
 
 logger = get_logger(__name__)
 
@@ -249,7 +252,7 @@ class LLMService(ABC):
 
             # Build conversation history and system prompt
             messages = self._build_messages(user_id, message, session_id)
-            system_prompt = self._build_system_prompt(user_id, current_query_type)
+            system_prompt = self._build_system_prompt(user_id, current_query_type, current_query_text=message)
 
             # Get tools in provider format
             base_tools = self._get_base_tool_definitions()
@@ -422,6 +425,35 @@ class LLMService(ABC):
             return json.dumps(self.last_tool_calls, default=str)
         return None
 
+    async def get_classification(self, query: str, system_prompt: str) -> Optional[Dict[str, Any]]:
+        """Get a lightweight classification from the LLM.
+        
+        Args:
+            query: User query to classify
+            system_prompt: Instructions for classification
+            
+        Returns:
+            Dict containing classification results or None if failed
+        """
+        try:
+            messages = [{"role": "user", "content": f"Query: {query}"}]
+            # We use an empty list for tools to force a text response
+            response = self._call_api(system_prompt, messages, tools=[])
+            
+            text, _ = self._parse_response(response)
+            
+            # Extract JSON from the response text
+            json_match = re.search(r"\{.*\}", text, re.DOTALL)
+            if json_match:
+                return json.loads(json_match.group(0))
+            
+            logger.warning("No JSON found in classification response", response_text=text[:100])
+            return None
+            
+        except Exception as e:
+            logger.warning(f"Classification failed: {e}")
+            return None
+
     def _get_base_tool_definitions(self) -> List[Dict]:
         """Return provider-neutral tool definitions.
 
@@ -430,150 +462,12 @@ class LLMService(ABC):
         """
         tools = []
         if self.graphql_client:
-            tools.append(self._get_analytics_tool_definition())
-            tools.append(self._get_raw_graphql_tool_definition())
+            # We instantiate with no args for now as they are stateles schemas
+            tools.append(ShopifyAnalyticsTool().to_dict())
+            tools.append(ShopifyGraphQLTool().to_dict())
         if self.chart_generator:
-            tools.append(self._get_chart_tool_definition())
+            tools.append(ChartGeneratorTool().to_dict())
         return tools
-
-    def _get_analytics_tool_definition(self) -> Dict[str, Any]:
-        """Return the shopify_analytics tool definition."""
-        return {
-            "name": "shopify_analytics",
-            "description": (
-                "Query Shopify products, orders, or customers with sorting, filtering, and pagination. "
-                "Use for: rankings (top products, biggest orders, best customers), "
-                "date-filtered queries, sorting by any field (price, revenue, date), "
-                "and paginating through large result sets. "
-                "Queries Shopify's GraphQL Admin API directly. "
-                "All timestamps in the response are already in IST (UTC+5:30) — display as-is, do NOT convert."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "resource": {
-                        "type": "string",
-                        "enum": ["products", "orders", "customers"],
-                        "description": "The type of Shopify resource to query",
-                    },
-                    "sort_key": {
-                        "type": "string",
-                        "description": (
-                            "Field to sort by. "
-                            "Products: TITLE, PRICE, BEST_SELLING, CREATED_AT, UPDATED_AT, INVENTORY_TOTAL. "
-                            "Orders: CREATED_AT, TOTAL_PRICE, ORDER_NUMBER, PROCESSED_AT. "
-                            "Customers: NAME, TOTAL_SPENT, ORDERS_COUNT, CREATED_AT, LAST_ORDER_DATE."
-                        ),
-                    },
-                    "reverse": {
-                        "type": "boolean",
-                        "description": "Sort descending (highest/newest first) when true. Default: true",
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Maximum results to return (1-250). Default: 10",
-                    },
-                    "query": {
-                        "type": "string",
-                        "description": (
-                            "Shopify search/filter string. IMPORTANT: Date filters MUST use UTC "
-                            "timestamps (NOT IST dates). Use the pre-computed UTC boundaries from "
-                            "the system prompt for 'today', 'yesterday', etc. "
-                            "Examples: 'financial_status:paid', 'status:active', "
-                            "'created_at:>=2026-02-08T18:30:00Z' (today in IST as UTC), "
-                            "'tag:sale'. Multiple filters can be combined with spaces."
-                        ),
-                    },
-                    "after": {
-                        "type": "string",
-                        "description": "Pagination cursor from previous response's end_cursor for next page",
-                    },
-                },
-                "required": ["resource"],
-            },
-        }
-
-    def _get_raw_graphql_tool_definition(self) -> Dict[str, Any]:
-        """Return the shopify_graphql tool definition."""
-        return {
-            "name": "shopify_graphql",
-            "description": (
-                "Execute a custom GraphQL query against Shopify's Admin API. "
-                "Use when shopify_analytics doesn't cover your needs — "
-                "for example: shop info, inventory levels, discount codes, "
-                "draft orders, metafields, collections, fulfillments, refunds, "
-                "or any complex/nested query. You write the full GraphQL query. "
-                "READ-ONLY: mutations are blocked for safety. "
-                "The Shopify Admin API uses Relay-style connections (edges/node pattern). "
-                "All timestamps in the response are already in IST (UTC+5:30) — display as-is, do NOT convert."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": (
-                            "The full GraphQL query string. Must start with 'query' or '{'. "
-                            "Use Shopify Admin API schema. Example: "
-                            '\'{ shop { name email myshopifyDomain plan { displayName } } }\''
-                        ),
-                    },
-                    "variables": {
-                        "type": "object",
-                        "description": "Optional GraphQL variables as a JSON object",
-                    },
-                },
-                "required": ["query"],
-            },
-        }
-
-    def _get_chart_tool_definition(self) -> Dict[str, Any]:
-        """Return the generate_chart tool definition."""
-        return {
-            "name": "generate_chart",
-            "description": (
-                "Generate a chart image that appears INLINE in your Telegram response. "
-                "ONLY call this tool when: (1) the user explicitly requests a chart/graph/visualization, "
-                "OR (2) the data has 3+ comparison points and a chart clearly adds value. "
-                "Do NOT call this tool if the user said 'no chart', 'text only', 'brief', or 'just the number'. "
-                "After calling this tool, you MUST write [CHART:N] (where N is the chart_index from the result) "
-                "on its own line in your response, at the exact position you want the image to appear. "
-                "Chart types: 'bar' for comparisons, 'line' for time trends, "
-                "'pie' for distribution, 'horizontal_bar' for ranked lists."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "chart_type": {
-                        "type": "string",
-                        "enum": ["bar", "line", "pie", "horizontal_bar"],
-                        "description": (
-                            "Type of chart. Use 'bar' for comparisons, 'line' for time trends, "
-                            "'pie' for proportions, 'horizontal_bar' for ranked lists."
-                        ),
-                    },
-                    "title": {
-                        "type": "string",
-                        "description": "Chart title (e.g., 'Top 5 Products by Revenue', 'Order Trend — Last 7 Days')",
-                    },
-                    "labels": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Category labels or time points (e.g., product names, dates)",
-                    },
-                    "values": {
-                        "type": "array",
-                        "items": {"type": "number"},
-                        "description": "Numeric values corresponding to each label (e.g., revenue, count)",
-                    },
-                    "y_axis_label": {
-                        "type": "string",
-                        "description": "Optional axis label (e.g., 'Revenue (₹)', 'Orders')",
-                    },
-                },
-                "required": ["chart_type", "title", "labels", "values"],
-            },
-        }
 
     async def _execute_tool(self, tool_name: str, tool_input: Dict[str, Any]) -> str:
         """Execute a tool call via direct Shopify GraphQL API or chart generation."""
@@ -811,7 +705,7 @@ class LLMService(ABC):
             ),
         })
 
-    def _build_system_prompt(self, user_id: int, query_type: Optional[str] = None) -> str:
+    def _build_system_prompt(self, user_id: int, query_type: Optional[str] = None, current_query_text: Optional[str] = None) -> str:
         """Build the system prompt with context, tool guidance, and formatting rules."""
         try:
             # Pre-compute UTC date boundaries so the LLM doesn't need timezone math
@@ -906,7 +800,9 @@ class LLMService(ABC):
             # Context from context builder
             if self.context_builder:
                 try:
-                    context = self.context_builder.build_context(user_id)
+                    context = self.context_builder.build_context(
+                        user_id, current_query_text=current_query_text
+                    )
 
                     if context.get("preferences"):
                         pref_str = ", ".join(

@@ -19,6 +19,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     filters,
 )
+from telegram.request import HTTPXRequest
 
 from src.config.settings import settings
 from src.database.init_db import init_database
@@ -34,6 +35,7 @@ from src.learning.template_manager import TemplateManager
 from src.learning.recovery_manager import RecoveryManager
 from src.learning.feedback_analyzer import FeedbackAnalyzer
 from src.learning.insight_aggregator import InsightAggregator
+from src.learning.vector_store import EmbeddingStore
 from src.bot.handlers import MessageHandler
 from src.bot.commands import BotCommands
 from src.bot.telegram_adapter import TelegramAdapter
@@ -48,6 +50,8 @@ class ShopifyAnalyticsBot:
 
     def __init__(self):
         self.application: Application | None = None
+        self._whatsapp_handler = None
+        self._whatsapp_runner = None
         self._running = False
 
     async def initialize(self) -> bool:
@@ -73,7 +77,10 @@ class ShopifyAnalyticsBot:
         Path("data").mkdir(exist_ok=True)
         Path("logs").mkdir(exist_ok=True)
 
-        # Initialize database
+        # Initialize database (creates tables, runs migrations, seeds templates)
+        # We pass vector_store so seed templates get embedded on first boot.
+        # EmbeddingStore needs db_ops, and init_database returns db_ops — so we
+        # do a two-step: basic init first, then vector_store, then seed/backfill.
         logger.info("Initializing database...")
         db_ops = init_database()
         if not db_ops:
@@ -81,8 +88,18 @@ class ShopifyAnalyticsBot:
             return False
         logger.info("Database initialized successfully")
 
+        # Initialize vector store for semantic search (lazy-loads embedding model)
+        vector_store = EmbeddingStore(db_ops, lazy_load=True)
+        logger.info("Vector store initialized (model loads on first use)")
+
+        # Backfill embeddings for any templates that don't have one yet
+        try:
+            vector_store.backfill_templates()
+        except Exception as e:
+            logger.warning("Embedding backfill skipped: %s", e)
+
         # Initialize core services
-        context_builder = ContextBuilder(db_ops)
+        context_builder = ContextBuilder(db_ops, vector_store=vector_store)
 
         # Initialize Shopify GraphQL client (direct API — no MCP subprocess needed)
         graphql_client = None
@@ -98,7 +115,7 @@ class ShopifyAnalyticsBot:
             db_ops, pattern_threshold=settings.learning_pattern_threshold
         )
         session_manager = SessionManager(db_ops, settings)
-        template_manager = TemplateManager(db_ops)
+        template_manager = TemplateManager(db_ops, vector_store=vector_store)
         recovery_manager = RecoveryManager(db_ops)
         feedback_analyzer = FeedbackAnalyzer()
         insight_aggregator = InsightAggregator(db_ops)
@@ -123,10 +140,17 @@ class ShopifyAnalyticsBot:
             chart_generator=chart_generator,
         )
 
+        # Initialize cross-channel linker (shared between Telegram + WhatsApp)
+        from src.services.channel_linker import ChannelLinker
+        channel_linker = ChannelLinker(db_ops) if settings.whatsapp.enabled else None
+        if channel_linker:
+            logger.info("ChannelLinker initialized for cross-channel identity linking")
+
         # Initialize bot handlers
         bot_commands = BotCommands(
             db_ops=db_ops,
             preference_manager=preference_manager,
+            channel_linker=channel_linker,
         )
         message_handler = MessageHandler(
             claude_service=llm_service,
@@ -143,9 +167,17 @@ class ShopifyAnalyticsBot:
 
         # Build Telegram application
         logger.info("Building Telegram bot application...")
+        # Increase connection timeouts to handle slow networks
+        request = HTTPXRequest(
+            connection_pool_size=16,
+            connect_timeout=60.0,
+            read_timeout=60.0,
+            write_timeout=60.0,
+        )
         self.application = (
             Application.builder()
             .token(settings.telegram.bot_token)
+            .request(request)
             .build()
         )
 
@@ -171,6 +203,9 @@ class ShopifyAnalyticsBot:
         self.application.add_handler(
             CommandHandler("verify", bot_commands.verify_command)
         )
+        self.application.add_handler(
+            CommandHandler("link", bot_commands.link_command)
+        )
 
         # Register callback query handler (for inline keyboards)
         self.application.add_handler(
@@ -191,11 +226,35 @@ class ShopifyAnalyticsBot:
         # Register error handler
         self.application.add_error_handler(message_handler.handle_error)
 
-        logger.info("Bot application built successfully")
+        logger.info("Telegram bot application built successfully")
+
+        # ── Initialize WhatsApp channel (optional) ─────────────────
+        if settings.whatsapp.enabled:
+            from src.bot.whatsapp_handler import WhatsAppWebhookHandler
+
+            self._whatsapp_handler = WhatsAppWebhookHandler(
+                llm_service=llm_service,
+                pattern_learner=pattern_learner,
+                preference_manager=preference_manager,
+                db_ops=db_ops,
+                session_manager=session_manager,
+                feedback_analyzer=feedback_analyzer,
+                template_manager=template_manager,
+                insight_aggregator=insight_aggregator,
+                channel_linker=channel_linker,
+            )
+            logger.info(
+                "WhatsApp webhook handler initialized",
+                port=settings.whatsapp.webhook_port,
+                provider=settings.whatsapp.provider,
+            )
+        else:
+            logger.info("WhatsApp channel disabled (set WHATSAPP_ENABLED=true to enable)")
+
         return True
 
     async def run(self):
-        """Run the bot."""
+        """Run the bot (Telegram polling + optional WhatsApp webhook server)."""
         success = await self.initialize()
         if not success:
             sys.exit(1)
@@ -203,15 +262,24 @@ class ShopifyAnalyticsBot:
         self._running = True
         logger.info("Starting bot polling...")
         print("\n✅ Shopify Analytics Bot is running!")
-        print("Press Ctrl+C to stop.\n")
 
-        # Start polling
+        # Start Telegram polling
         await self.application.initialize()
         await self.application.start()
         await self.application.updater.start_polling(
             allowed_updates=Update.ALL_TYPES,
             drop_pending_updates=True,
         )
+        print("  📱 Telegram channel: active (polling)")
+
+        # Start WhatsApp webhook server (if enabled)
+        if self._whatsapp_handler:
+            self._whatsapp_runner = await self._whatsapp_handler.start()
+            print(f"  💬 WhatsApp channel: active (webhook on port {settings.whatsapp.webhook_port})")
+        else:
+            print("  💬 WhatsApp channel: disabled")
+
+        print("\nPress Ctrl+C to stop.\n")
 
         # Keep running until stopped
         stop_event = asyncio.Event()
@@ -236,6 +304,13 @@ class ShopifyAnalyticsBot:
             await self.application.stop()
             await self.application.shutdown()
             logger.info("Telegram bot stopped")
+
+        if self._whatsapp_handler:
+            await self._whatsapp_handler.shutdown()
+            logger.info("WhatsApp handler stopped")
+        if self._whatsapp_runner:
+            await self._whatsapp_runner.cleanup()
+            logger.info("WhatsApp webhook server stopped")
 
         logger.info("Bot shutdown complete")
         print("\n👋 Bot stopped. Goodbye!")

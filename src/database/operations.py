@@ -28,6 +28,7 @@ from src.database.models import (
     GlobalInsight,
     ResponseFeedback,
     ChannelSession,
+    EmbeddingVector,
 )
 
 
@@ -340,7 +341,9 @@ class DatabaseOperations:
         session = self.get_session()
         try:
             stmt = select(ShopifyStore).where(ShopifyStore.user_id == user_id)
-            store = session.execute(stmt).scalar_one_or_none()
+            # Use scalars().first() to return the first store found, avoiding errors
+            # if multiple stores were accidentally created for the same user.
+            store = session.execute(stmt).scalars().first()
             if store:
                 store.access_token = decrypt_token(store.access_token)
             return store
@@ -2434,5 +2437,400 @@ class DatabaseOperations:
 
             session.commit()
             return counts
+        finally:
+            session.close()
+
+    # ── WhatsApp / Multi-channel operations ────────────────────────
+
+    def get_channel_session(
+        self,
+        channel_type: str,
+        channel_user_id: str,
+    ) -> Optional[ChannelSession]:
+        """Look up an existing ChannelSession by channel type and user ID.
+
+        Args:
+            channel_type: e.g. "whatsapp", "telegram"
+            channel_user_id: Channel-specific identifier (phone number, telegram ID, etc.)
+
+        Returns:
+            ChannelSession or None.
+        """
+        session = self.get_session()
+        try:
+            stmt = select(ChannelSession).where(
+                and_(
+                    ChannelSession.channel_type == channel_type,
+                    ChannelSession.channel_user_id == channel_user_id,
+                )
+            )
+            return session.execute(stmt).scalar_one_or_none()
+        finally:
+            session.close()
+
+    def create_channel_session(
+        self,
+        user_id: int,
+        channel_type: str,
+        channel_user_id: str,
+        channel_username: Optional[str] = None,
+        channel_metadata: Optional[str] = None,
+    ) -> ChannelSession:
+        """Create a new ChannelSession linking a channel identifier to an internal user.
+
+        Args:
+            user_id: Internal User.id
+            channel_type: e.g. "whatsapp", "telegram"
+            channel_user_id: Channel-specific identifier
+            channel_username: Optional display name / username
+            channel_metadata: Optional JSON metadata
+
+        Returns:
+            Newly created ChannelSession.
+        """
+        session = self.get_session()
+        try:
+            cs = ChannelSession(
+                user_id=user_id,
+                channel_type=channel_type,
+                channel_user_id=channel_user_id,
+                channel_username=channel_username,
+                channel_metadata=channel_metadata,
+                is_active=True,
+                created_at=now_ist(),
+                last_active=now_ist(),
+            )
+            session.add(cs)
+            session.commit()
+            session.refresh(cs)
+            return cs
+        finally:
+            session.close()
+
+    def update_channel_session_activity(self, channel_session_id: int) -> None:
+        """Touch the last_active timestamp on a ChannelSession."""
+        session = self.get_session()
+        try:
+            cs = session.get(ChannelSession, channel_session_id)
+            if cs:
+                cs.last_active = now_ist()
+                session.commit()
+        finally:
+            session.close()
+
+    def merge_users(
+        self,
+        keep_user_id: int,
+        merge_user_id: int,
+        target_channel: str,
+        target_channel_id: str,
+    ) -> None:
+        """Merge two user accounts into one canonical identity.
+
+        Re-points all data from ``merge_user_id`` to ``keep_user_id``,
+        copies over the channel-specific identifier, updates channel
+        sessions, and deletes the merged user.
+
+        This is used when a user links their Telegram and WhatsApp
+        accounts via the /link command.
+
+        Args:
+            keep_user_id: The user ID to keep (canonical).
+            merge_user_id: The user ID to merge into keep and then delete.
+            target_channel: The channel type of the merged user ("telegram" or "whatsapp").
+            target_channel_id: The channel-specific ID of the merged user.
+        """
+        from src.utils.logger import get_logger
+        _logger = get_logger(__name__)
+
+        session = self.get_session()
+        try:
+            keep_user = session.get(User, keep_user_id)
+            merge_user = session.get(User, merge_user_id)
+
+            if not keep_user or not merge_user:
+                raise ValueError(f"User not found: keep={keep_user_id}, merge={merge_user_id}")
+
+            # ── Step 1: Copy channel identifiers to the kept user ──
+            if target_channel == "whatsapp" and merge_user.whatsapp_phone:
+                keep_user.whatsapp_phone = merge_user.whatsapp_phone
+                merge_user.whatsapp_phone = None  # Clear to avoid unique constraint
+            elif target_channel == "telegram" and merge_user.telegram_user_id:
+                keep_user.telegram_user_id = merge_user.telegram_user_id
+                merge_user.telegram_user_id = None
+
+            # Copy display info if the kept user is missing it
+            if not keep_user.first_name and merge_user.first_name:
+                keep_user.first_name = merge_user.first_name
+            if not keep_user.display_name and merge_user.display_name:
+                keep_user.display_name = merge_user.display_name
+
+            # Merge interaction counts
+            keep_user.interaction_count += merge_user.interaction_count
+
+            # Carry over verification status
+            if merge_user.is_verified:
+                keep_user.is_verified = True
+
+            session.flush()  # Ensure unique constraints are clear
+
+            # ── Step 2: Re-point all foreign-key references ──
+
+            # Conversations
+            session.execute(
+                Conversation.__table__.update()
+                .where(Conversation.user_id == merge_user_id)
+                .values(user_id=keep_user_id)
+            )
+
+            # Sessions
+            session.execute(
+                Session.__table__.update()
+                .where(Session.user_id == merge_user_id)
+                .values(user_id=keep_user_id)
+            )
+
+            # Query patterns
+            session.execute(
+                QueryPattern.__table__.update()
+                .where(QueryPattern.user_id == merge_user_id)
+                .values(user_id=keep_user_id)
+            )
+
+            # User preferences (handle potential key conflicts)
+            merge_prefs = session.execute(
+                select(UserPreference).where(UserPreference.user_id == merge_user_id)
+            ).scalars().all()
+            for pref in merge_prefs:
+                existing = session.execute(
+                    select(UserPreference).where(
+                        and_(
+                            UserPreference.user_id == keep_user_id,
+                            UserPreference.preference_key == pref.preference_key,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if existing:
+                    # Keep the higher-confidence one
+                    if pref.confidence_score > existing.confidence_score:
+                        existing.preference_value = pref.preference_value
+                        existing.confidence_score = pref.confidence_score
+                    session.delete(pref)
+                else:
+                    pref.user_id = keep_user_id
+
+            # Tool usage
+            session.execute(
+                ToolUsage.__table__.update()
+                .where(ToolUsage.user_id == merge_user_id)
+                .values(user_id=keep_user_id)
+            )
+
+            # Query errors
+            session.execute(
+                QueryError.__table__.update()
+                .where(QueryError.user_id == merge_user_id)
+                .values(user_id=keep_user_id)
+            )
+
+            # Response feedback
+            session.execute(
+                ResponseFeedback.__table__.update()
+                .where(ResponseFeedback.user_id == merge_user_id)
+                .values(user_id=keep_user_id)
+            )
+
+            # Channel sessions — re-point to kept user
+            session.execute(
+                ChannelSession.__table__.update()
+                .where(ChannelSession.user_id == merge_user_id)
+                .values(user_id=keep_user_id)
+            )
+
+            # Shopify stores — move if kept user doesn't have one
+            keep_stores = session.execute(
+                select(ShopifyStore).where(ShopifyStore.user_id == keep_user_id)
+            ).scalars().all()
+            if not keep_stores:
+                session.execute(
+                    ShopifyStore.__table__.update()
+                    .where(ShopifyStore.user_id == merge_user_id)
+                    .values(user_id=keep_user_id)
+                )
+            else:
+                merge_stores = session.execute(
+                    select(ShopifyStore).where(ShopifyStore.user_id == merge_user_id)
+                ).scalars().all()
+                for store in merge_stores:
+                    session.delete(store)
+
+            # ── Step 3: Delete the merged user ──
+            session.delete(merge_user)
+
+            session.commit()
+
+            _logger.info(
+                "Users merged successfully",
+                keep_user_id=keep_user_id,
+                merged_user_id=merge_user_id,
+                target_channel=target_channel,
+            )
+
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def create_whatsapp_user(
+        self,
+        whatsapp_phone: str,
+        display_name: str = "",
+        first_name: str = "",
+    ) -> User:
+        """Create a new User originating from WhatsApp (no Telegram ID).
+
+        If a user with this phone already exists, return them instead.
+
+        Args:
+            whatsapp_phone: WhatsApp phone number (digits only, no +).
+            display_name: Profile display name.
+            first_name: First name extracted from profile.
+
+        Returns:
+            User object.
+        """
+        session = self.get_session()
+        try:
+            # Check if user already exists by phone
+            stmt = select(User).where(User.whatsapp_phone == whatsapp_phone)
+            user = session.execute(stmt).scalar_one_or_none()
+
+            if user is None:
+                user = User(
+                    telegram_user_id=None,
+                    whatsapp_phone=whatsapp_phone,
+                    display_name=display_name or whatsapp_phone,
+                    first_name=first_name,
+                )
+                session.add(user)
+                session.commit()
+                session.refresh(user)
+
+            return user
+        finally:
+            session.close()
+
+    # ------------------------------------------------------------------
+    # Embedding vector operations (for semantic search)
+    # ------------------------------------------------------------------
+
+    def upsert_embedding(
+        self,
+        entity_type: str,
+        entity_id: int,
+        embedding_bytes: bytes,
+        source_text: Optional[str] = None,
+    ) -> None:
+        """Insert or update an embedding vector.
+
+        Args:
+            entity_type: ``"template"`` | ``"error_lesson"``
+            entity_id:   Primary key in the source table.
+            embedding_bytes: Raw bytes from ``numpy_array.tobytes()``.
+            source_text: Original text that was embedded (for debugging).
+        """
+        session = self.get_session()
+        try:
+            stmt = select(EmbeddingVector).where(
+                and_(
+                    EmbeddingVector.entity_type == entity_type,
+                    EmbeddingVector.entity_id == entity_id,
+                )
+            )
+            existing = session.execute(stmt).scalar_one_or_none()
+
+            if existing:
+                existing.embedding_blob = embedding_bytes
+                existing.source_text = source_text
+            else:
+                new_row = EmbeddingVector(
+                    entity_type=entity_type,
+                    entity_id=entity_id,
+                    embedding_blob=embedding_bytes,
+                    source_text=source_text,
+                )
+                session.add(new_row)
+
+            session.commit()
+        except Exception as e:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def get_all_embeddings(
+        self,
+        entity_type: str,
+    ) -> list:
+        """Retrieve all embeddings for a given entity type.
+
+        Args:
+            entity_type: ``"template"`` or ``"error_lesson"``
+
+        Returns:
+            List of ``(entity_id, numpy_array, source_text)`` tuples.
+            The numpy array is float32 with shape ``(384,)``.
+        """
+        import numpy as np
+
+        session = self.get_session()
+        try:
+            stmt = select(EmbeddingVector).where(
+                EmbeddingVector.entity_type == entity_type
+            )
+            rows = session.execute(stmt).scalars().all()
+
+            results = []
+            for row in rows:
+                try:
+                    vec = np.frombuffer(row.embedding_blob, dtype=np.float32).copy()
+                except Exception:
+                    vec = None
+                results.append((row.entity_id, vec, row.source_text))
+
+            return results
+        finally:
+            session.close()
+
+    def delete_embedding(
+        self,
+        entity_type: str,
+        entity_id: int,
+    ) -> bool:
+        """Delete an embedding vector.
+
+        Args:
+            entity_type: ``"template"`` or ``"error_lesson"``
+            entity_id:   Primary key in the source table.
+
+        Returns:
+            True if a row was deleted, False if not found.
+        """
+        session = self.get_session()
+        try:
+            stmt = select(EmbeddingVector).where(
+                and_(
+                    EmbeddingVector.entity_type == entity_type,
+                    EmbeddingVector.entity_id == entity_id,
+                )
+            )
+            existing = session.execute(stmt).scalar_one_or_none()
+
+            if existing:
+                session.delete(existing)
+                session.commit()
+                return True
+            return False
         finally:
             session.close()

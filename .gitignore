@@ -8,6 +8,7 @@ data/*.db
 
 # Logs
 logs/*.log
+ngrok.log
 
 # Python
 __pycache__/

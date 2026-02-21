@@ -54,6 +54,7 @@ class MessageHandler:
         template_manager: TemplateManager = None,
         insight_aggregator: InsightAggregator = None,
         telegram_adapter: TelegramAdapter = None,
+        channel_adapter: ChannelAdapter = None,
     ):
         """
         Initialize MessageHandler.
@@ -68,7 +69,8 @@ class MessageHandler:
             feedback_analyzer: Optional FeedbackAnalyzer for implicit feedback detection
             template_manager: Optional TemplateManager for query template learning
             insight_aggregator: Optional InsightAggregator for cross-user insights
-            telegram_adapter: Optional TelegramAdapter for channel-specific formatting
+            telegram_adapter: Optional TelegramAdapter for channel-specific formatting (deprecated, use channel_adapter)
+            channel_adapter: Optional ChannelAdapter — preferred generic adapter parameter
         """
         self.claude_service = claude_service
         self.pattern_learner = pattern_learner
@@ -79,7 +81,8 @@ class MessageHandler:
         self.feedback_analyzer = feedback_analyzer
         self.template_manager = template_manager
         self.insight_aggregator = insight_aggregator
-        self.telegram_adapter = telegram_adapter or TelegramAdapter()
+        # Support both the old telegram_adapter param and the new generic channel_adapter
+        self.telegram_adapter = channel_adapter or telegram_adapter or TelegramAdapter()
 
         # Counter for periodic aggregation
         self._interaction_count = 0

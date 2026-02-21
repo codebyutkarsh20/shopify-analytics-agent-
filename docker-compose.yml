@@ -12,6 +12,10 @@ services:
     env_file:
       - .env
 
+    # Expose WhatsApp webhook port (only needed if WHATSAPP_ENABLED=true)
+    ports:
+      - "${WHATSAPP_WEBHOOK_PORT:-8080}:${WHATSAPP_WEBHOOK_PORT:-8080}"
+
     # Persist database and logs outside the container
     volumes:
       - bot-data:/app/data

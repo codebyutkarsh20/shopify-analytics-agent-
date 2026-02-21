@@ -97,6 +97,60 @@ class LoggingConfig:
 
 
 @dataclass
+class WhatsAppConfig:
+    """WhatsApp Business API settings.
+
+    Supports two providers:
+      - "meta"   → Meta Cloud API (direct)
+      - "twilio" → Twilio WhatsApp API
+
+    Environment variables:
+      WHATSAPP_ENABLED          : "true" to enable the WhatsApp channel
+      WHATSAPP_PROVIDER         : "meta" (default) or "twilio"
+      WHATSAPP_VERIFY_TOKEN     : Webhook verification token (you choose)
+      WHATSAPP_WEBHOOK_PORT     : Port for the inbound webhook server (default 8080)
+
+      # Meta Cloud API
+      WHATSAPP_ACCESS_TOKEN     : Permanent access token from Meta
+      WHATSAPP_PHONE_NUMBER_ID  : Phone Number ID from Meta dashboard
+
+      # Twilio
+      TWILIO_ACCOUNT_SID        : Twilio Account SID
+      TWILIO_AUTH_TOKEN          : Twilio Auth Token
+      TWILIO_WHATSAPP_NUMBER    : Twilio WhatsApp number (e.g. whatsapp:+14155238886)
+    """
+    enabled: bool = False
+    provider: str = "meta"           # "meta" or "twilio"
+    verify_token: str = ""
+    webhook_port: int = 8080
+
+    # Meta Cloud API
+    access_token: str = ""
+    phone_number_id: str = ""
+
+    # Twilio
+    twilio_account_sid: str = ""
+    twilio_auth_token: str = ""
+    twilio_whatsapp_number: str = ""
+
+    def __post_init__(self):
+        self.enabled = os.getenv("WHATSAPP_ENABLED", "false").lower() in ("true", "1", "yes")
+        self.provider = os.getenv("WHATSAPP_PROVIDER", self.provider).lower()
+        self.verify_token = os.getenv("WHATSAPP_VERIFY_TOKEN", self.verify_token)
+        port_str = os.getenv("WHATSAPP_WEBHOOK_PORT", str(self.webhook_port))
+        self.webhook_port = int(port_str) if port_str.isdigit() else self.webhook_port
+
+        # Meta
+        self.access_token = os.getenv("WHATSAPP_ACCESS_TOKEN", self.access_token)
+        self.phone_number_id = os.getenv("WHATSAPP_PHONE_NUMBER_ID", self.phone_number_id)
+
+        # Twilio
+        self.twilio_account_sid = os.getenv("TWILIO_ACCOUNT_SID", self.twilio_account_sid)
+        self.twilio_auth_token = os.getenv("TWILIO_AUTH_TOKEN", self.twilio_auth_token)
+        self.twilio_whatsapp_number = os.getenv("TWILIO_WHATSAPP_NUMBER", self.twilio_whatsapp_number)
+
+
+@dataclass
 class SecurityConfig:
     """Security-related settings."""
     encryption_key: str = ""
@@ -116,6 +170,7 @@ class SecurityConfig:
 @dataclass
 class Settings:
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
+    whatsapp: WhatsAppConfig = field(default_factory=WhatsAppConfig)
     anthropic: AnthropicConfig = field(default_factory=AnthropicConfig)
     openai: OpenAIConfig = field(default_factory=OpenAIConfig)
     shopify: ShopifyConfig = field(default_factory=ShopifyConfig)

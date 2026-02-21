@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import ForeignKey, String, Integer, Text, Boolean, Float, DateTime, UniqueConstraint
+from sqlalchemy import ForeignKey, String, Integer, Text, Boolean, Float, DateTime, LargeBinary, UniqueConstraint, Index
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from src.utils.timezone import now_ist
@@ -19,13 +19,20 @@ class Base(DeclarativeBase):
 # ---------------------------------------------------------------------------
 
 class User(Base):
-    """User model storing user information (channel-agnostic)."""
+    """User model storing user information (channel-agnostic).
+
+    A user can arrive via Telegram, WhatsApp, or both.  The
+    ``telegram_user_id`` is nullable so that WhatsApp-only users can
+    be created without a Telegram ID.  Cross-channel linking is handled
+    by the ``ChannelSession`` table.
+    """
 
     __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    telegram_user_id: Mapped[int] = mapped_column(Integer, unique=True, nullable=False, index=True)
+    telegram_user_id: Mapped[Optional[int]] = mapped_column(Integer, unique=True, nullable=True, index=True)
     telegram_username: Mapped[Optional[str]] = mapped_column(String(255))
+    whatsapp_phone: Mapped[Optional[str]] = mapped_column(String(50), unique=True, nullable=True, index=True)
     first_name: Mapped[Optional[str]] = mapped_column(String(255))
     display_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     is_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=True)
@@ -391,3 +398,32 @@ class ResponseFeedback(Base):
 
     def __repr__(self) -> str:
         return f"<ResponseFeedback(id={self.id}, type={self.feedback_type}, score={self.quality_score})>"
+
+
+# ---------------------------------------------------------------------------
+# Vector embeddings for semantic search
+# ---------------------------------------------------------------------------
+
+class EmbeddingVector(Base):
+    """Stores embedding vectors for semantic similarity search.
+
+    Each row maps an (entity_type, entity_id) pair to a dense float32
+    vector stored as a BLOB.  Used to find templates and learnings that
+    are semantically similar to a user's query even when keywords differ.
+    """
+
+    __tablename__ = "embedding_vectors"
+    __table_args__ = (
+        UniqueConstraint("entity_type", "entity_id", name="uq_embedding_entity"),
+        Index("idx_embedding_type", "entity_type"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    entity_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    entity_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    embedding_blob: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    source_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist, nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<EmbeddingVector(entity_type={self.entity_type}, entity_id={self.entity_id})>"

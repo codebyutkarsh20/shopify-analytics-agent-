@@ -397,7 +397,6 @@ class ShopifyGraphQLClient:
                         subtotalPriceSet { shopMoney { amount currencyCode } }
                         displayFinancialStatus
                         displayFulfillmentStatus
-                        customer { id firstName lastName email }
                         lineItems(first: 10) {
                             edges {
                                 node {

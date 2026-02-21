@@ -419,6 +419,7 @@ def format_help_message() -> str:
         "• /connect — Connect your Shopify store\n"
         "• /status — Check connection status\n"
         "• /settings — View preferences\n"
+        "• /link — Link Telegram &amp; WhatsApp accounts\n"
         "• /forget — Clear learned data\n"
         "• /help — Show this message\n\n"
 
