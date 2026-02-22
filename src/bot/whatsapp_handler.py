@@ -729,8 +729,14 @@ class WhatsAppWebhookHandler:
                 tool_calls_json=tool_calls_json,
             )
 
-            # Step 9.5: Send feedback buttons (👍/👎)
-            await self._send_feedback_buttons(from_number, conversation.id)
+            # Step 9.5: Send feedback buttons (👍/👎) — only for analytical responses
+            # Skip for general/utility responses (greetings, errors, no-store prompts)
+            has_tool_calls = any(
+                tc.get("success") for tc in getattr(self.llm_service, "last_tool_calls", [])
+            )
+            has_charts = bool(chart_files)
+            if has_tool_calls or has_charts:
+                await self._send_feedback_buttons(from_number, conversation.id)
 
             logger.info(
                 "WhatsApp message processed",
