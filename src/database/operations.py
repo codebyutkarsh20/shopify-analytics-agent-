@@ -2553,11 +2553,15 @@ class DatabaseOperations:
 
             # ── Step 1: Copy channel identifiers to the kept user ──
             if target_channel == "whatsapp" and merge_user.whatsapp_phone:
-                keep_user.whatsapp_phone = merge_user.whatsapp_phone
+                wp = merge_user.whatsapp_phone
                 merge_user.whatsapp_phone = None  # Clear to avoid unique constraint
+                session.flush()                   # Force SQLite to release the lock
+                keep_user.whatsapp_phone = wp
             elif target_channel == "telegram" and merge_user.telegram_user_id:
-                keep_user.telegram_user_id = merge_user.telegram_user_id
+                tg = merge_user.telegram_user_id
                 merge_user.telegram_user_id = None
+                session.flush()
+                keep_user.telegram_user_id = tg
 
             # Copy display info if the kept user is missing it
             if not keep_user.first_name and merge_user.first_name:
