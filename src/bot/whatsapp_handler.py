@@ -30,7 +30,7 @@ from src.learning.template_manager import TemplateManager
 from src.learning.feedback_analyzer import FeedbackAnalyzer
 from src.learning.insight_aggregator import InsightAggregator
 from src.bot.whatsapp_adapter import WhatsAppAdapter
-from src.utils.logger import get_logger
+from src.utils.logger import get_logger, new_correlation_id
 from src.utils.rate_limiter import RateLimiter
 from src.utils.formatters import format_error_message
 
@@ -126,6 +126,49 @@ class MetaWhatsAppClient:
             data = await resp.json()
             if resp.status != 200:
                 logger.error("Meta API send_image failed", status=resp.status, body=data)
+            return data
+
+    async def send_interactive_buttons(
+        self, to: str, body_text: str, buttons: List[Dict[str, str]]
+    ) -> Dict[str, Any]:
+        """Send an interactive button message via Meta Cloud API.
+
+        WhatsApp supports up to 3 quick-reply buttons per message.
+
+        Args:
+            to: Recipient phone number.
+            body_text: Message body text shown above the buttons.
+            buttons: List of dicts with ``id`` and ``title`` keys.
+                     Example: [{"id": "fb_up_42", "title": "👍"}, ...]
+
+        Returns:
+            API response dict.
+        """
+        session = await self._get_session()
+        url = f"{self.BASE_URL}/{self.phone_number_id}/messages"
+        payload = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": to,
+            "type": "interactive",
+            "interactive": {
+                "type": "button",
+                "body": {"text": body_text},
+                "action": {
+                    "buttons": [
+                        {
+                            "type": "reply",
+                            "reply": {"id": btn["id"], "title": btn["title"]},
+                        }
+                        for btn in buttons[:3]  # WhatsApp max 3 buttons
+                    ]
+                },
+            },
+        }
+        async with session.post(url, json=payload) as resp:
+            data = await resp.json()
+            if resp.status != 200:
+                logger.error("Meta API send_interactive_buttons failed", status=resp.status, body=data)
             return data
 
     async def send_typing_indicator(self, to: str) -> None:
@@ -236,8 +279,31 @@ def parse_meta_webhook(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             return None
 
         msg = messages[0]
-        if msg.get("type") != "text":
-            logger.debug("Ignoring non-text WhatsApp message", msg_type=msg.get("type"))
+        msg_type = msg.get("type")
+
+        # Handle interactive button replies (e.g. feedback 👍/👎)
+        if msg_type == "interactive":
+            interactive = msg.get("interactive", {})
+            if interactive.get("type") == "button_reply":
+                button_reply = interactive.get("button_reply", {})
+                from_number = msg.get("from", "")
+                contacts = value.get("contacts", [])
+                profile_name = ""
+                if contacts:
+                    profile = contacts[0].get("profile", {})
+                    profile_name = profile.get("name", "")
+                return {
+                    "from_number": from_number,
+                    "message_text": button_reply.get("title", ""),
+                    "profile_name": profile_name,
+                    "message_id": msg.get("id", ""),
+                    "timestamp": msg.get("timestamp", ""),
+                    "button_reply_id": button_reply.get("id", ""),
+                }
+            return None
+
+        if msg_type != "text":
+            logger.debug("Ignoring non-text WhatsApp message", msg_type=msg_type)
             return None
 
         from_number = msg.get("from", "")
@@ -429,6 +495,41 @@ class WhatsAppWebhookHandler:
         """Health check endpoint."""
         return web.json_response({"status": "ok", "channel": "whatsapp"})
 
+    def _verify_meta_signature(self, request: web.Request, body: bytes) -> bool:
+        """Verify the X-Hub-Signature-256 header from Meta webhooks.
+
+        Meta signs every webhook POST with HMAC-SHA256 using the App Secret.
+        If the app_secret is not configured, signature verification is skipped
+        (development mode).
+
+        Args:
+            request: The incoming aiohttp request.
+            body: The raw request body bytes.
+
+        Returns:
+            True if the signature is valid or verification is skipped.
+        """
+        app_secret = os.getenv("META_APP_SECRET", "")
+        if not app_secret:
+            # No app secret configured — skip verification (dev mode)
+            return True
+
+        signature_header = request.headers.get("X-Hub-Signature-256", "")
+        if not signature_header.startswith("sha256="):
+            logger.warning("Missing or malformed X-Hub-Signature-256 header")
+            return False
+
+        expected_sig = signature_header[7:]  # strip "sha256=" prefix
+        computed_sig = hmac.new(
+            app_secret.encode(), body, hashlib.sha256
+        ).hexdigest()
+
+        if not hmac.compare_digest(expected_sig, computed_sig):
+            logger.warning("WhatsApp webhook signature verification failed")
+            return False
+
+        return True
+
     async def _handle_incoming(self, request: web.Request) -> web.Response:
         """Handle inbound webhook POST with a WhatsApp message.
 
@@ -436,6 +537,15 @@ class WhatsAppWebhookHandler:
         and processes the message asynchronously.
         """
         try:
+            # Read raw body for signature verification
+            body = await request.read()
+
+            # Verify Meta HMAC signature (if app secret is configured)
+            if settings.whatsapp.provider != "twilio":
+                if not self._verify_meta_signature(request, body):
+                    logger.warning("Rejected webhook: invalid signature")
+                    return web.Response(status=403, text="Invalid signature")
+
             # Parse based on provider
             if settings.whatsapp.provider == "twilio":
                 # Twilio sends form-encoded data
@@ -443,7 +553,8 @@ class WhatsAppWebhookHandler:
                 event = parse_twilio_webhook(data)
             else:
                 # Meta sends JSON
-                data = await request.json()
+                import json as _json
+                data = _json.loads(body)
                 event = parse_meta_webhook(data)
 
             if event is None:
@@ -474,6 +585,9 @@ class WhatsAppWebhookHandler:
         Mirrors the 10-step flow in handlers.py MessageHandler.handle_message
         but adapted for WhatsApp's stateless webhook model.
         """
+        # Generate a correlation ID for this request so all log lines can be traced
+        cid = new_correlation_id()
+
         from_number = event["from_number"]
         message_text = event["message_text"]
 
@@ -490,6 +604,12 @@ class WhatsAppWebhookHandler:
             # Step 1: Resolve or create user via ChannelSession
             user = self._resolve_whatsapp_user(event)
             logger.debug("WhatsApp user resolved", user_id=user.id, phone=from_number)
+
+            # Check if this is a feedback button reply (👍/👎)
+            feedback = self._handle_feedback_button(event)
+            if feedback:
+                await self._process_feedback(user, from_number, feedback)
+                return
 
             # Update user activity
             self.db_ops.update_user_activity(user.id)
@@ -599,7 +719,7 @@ class WhatsAppWebhookHandler:
 
             # Step 9: Save conversation
             tool_calls_json = self.llm_service.last_tool_calls_json
-            self.db_ops.save_conversation(
+            conversation = self.db_ops.save_conversation(
                 user_id=user.id,
                 message=message_text,
                 response=response,
@@ -608,6 +728,9 @@ class WhatsAppWebhookHandler:
                 channel_type="whatsapp",
                 tool_calls_json=tool_calls_json,
             )
+
+            # Step 9.5: Send feedback buttons (👍/👎)
+            await self._send_feedback_buttons(from_number, conversation.id)
 
             logger.info(
                 "WhatsApp message processed",
@@ -795,6 +918,107 @@ class WhatsAppWebhookHandler:
                 f"This will merge your WhatsApp and Telegram accounts "
                 f"so you share the same history, preferences, and store connections.",
             )
+
+    # ── Explicit feedback (👍 / 👎 buttons) ─────────────────────
+
+    async def _send_feedback_buttons(self, to: str, conversation_id: int) -> None:
+        """Send 👍/👎 interactive buttons after a bot response.
+
+        Uses WhatsApp interactive button messages if the client supports it,
+        otherwise falls back to a simple text prompt.
+        """
+        try:
+            if hasattr(self._client, "send_interactive_buttons"):
+                await self._client.send_interactive_buttons(
+                    to=to,
+                    body_text="Was this helpful?",
+                    buttons=[
+                        {"id": f"fb_up_{conversation_id}", "title": "👍 Yes"},
+                        {"id": f"fb_down_{conversation_id}", "title": "👎 No"},
+                    ],
+                )
+            else:
+                # Twilio fallback — simple text
+                await self._send_text(
+                    to,
+                    f"_Was this helpful? Reply *yes* or *no*_",
+                )
+        except Exception as e:
+            logger.debug("Failed to send feedback buttons", error=str(e))
+
+    def _handle_feedback_button(self, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Check if an incoming message is a feedback button reply.
+
+        WhatsApp interactive button replies arrive with type=interactive
+        and contain the button ID we set (e.g., fb_up_42).
+
+        Returns:
+            Dict with ``direction`` ("up"/"down") and ``conversation_id``,
+            or None if not a feedback reply.
+        """
+        button_id = event.get("button_reply_id", "")
+        if not button_id.startswith("fb_"):
+            return None
+
+        try:
+            parts = button_id.split("_", 2)  # ["fb", "up"/"down", "conv_id"]
+            return {
+                "direction": parts[1],
+                "conversation_id": int(parts[2]),
+            }
+        except (IndexError, ValueError):
+            return None
+
+    async def _process_feedback(self, user, from_number: str, feedback: Dict[str, Any]) -> None:
+        """Process an explicit 👍/👎 feedback reply.
+
+        Updates the same tables as the implicit FeedbackAnalyzer so the
+        learning pipeline benefits from both implicit and explicit signals.
+        """
+        is_positive = feedback["direction"] == "up"
+        conversation_id = feedback["conversation_id"]
+        quality_score = 1.0 if is_positive else -1.0
+        feedback_type = "explicit_thumbs_up" if is_positive else "explicit_thumbs_down"
+
+        try:
+            # 1. Save feedback record
+            self.db_ops.save_response_feedback(
+                conversation_id=conversation_id,
+                user_id=user.id,
+                feedback_type=feedback_type,
+                quality_score=quality_score,
+                signal_text="👍" if is_positive else "👎",
+            )
+
+            # 2. Update conversation quality
+            self.db_ops.update_conversation_quality(
+                conversation_id=conversation_id,
+                quality_score=quality_score,
+            )
+
+            # 3. Adjust template confidence if a template was used
+            if self.template_manager:
+                convs = self.db_ops.get_latest_conversation(user.id, limit=5)
+                for conv in convs:
+                    if conv.id == conversation_id and conv.template_id_used:
+                        self.template_manager.update_template_quality(
+                            template_id=conv.template_id_used,
+                            quality_score=quality_score,
+                        )
+                        break
+
+            # 4. Acknowledge
+            emoji = "👍" if is_positive else "👎"
+            await self._send_text(from_number, f"Thanks for the feedback! {emoji}")
+
+            logger.info(
+                "WhatsApp explicit feedback received",
+                user_id=user.id,
+                conversation_id=conversation_id,
+                feedback=feedback["direction"],
+            )
+        except Exception as e:
+            logger.error("Error processing WhatsApp feedback", error=str(e))
 
     # ── Response sending ───────────────────────────────────────────
 

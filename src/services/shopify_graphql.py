@@ -45,6 +45,58 @@ CUSTOMER_SORT_KEYS = [
 ]
 
 
+# Characters that should NEVER appear in a Shopify filter string.
+# These could indicate injection attempts or malformed input.
+_FILTER_BLOCKLIST_RE = re.compile(
+    r"[{}\[\]<>;`\\]"          # braces, brackets, angle-brackets, semicolons, backticks, backslashes
+    r"|--"                      # SQL comment sequences
+    r"|/\*"                     # C-style comment open
+    r"|\bmutation\b"           # GraphQL mutation keyword
+    r"|\bsubscription\b"       # GraphQL subscription keyword
+    r"|\b__schema\b"           # introspection
+    r"|\b__type\b",            # introspection
+    re.IGNORECASE,
+)
+
+# Max length for a filter/query string to prevent abuse
+_MAX_FILTER_LENGTH = 500
+
+
+def _validate_filter_string(filter_str: Optional[str]) -> Optional[str]:
+    """Validate and sanitize a Shopify filter/query string.
+
+    Ensures the filter contains only safe characters expected by
+    Shopify's query syntax (e.g., ``status:active``, ``tag:sale``,
+    ``created_at:>2024-01-01``).
+
+    Args:
+        filter_str: The raw filter string from the user/LLM.
+
+    Returns:
+        The validated filter string, or None if it was None/empty.
+
+    Raises:
+        ValueError: If the filter contains suspicious or blocked patterns.
+    """
+    if not filter_str:
+        return filter_str
+
+    if len(filter_str) > _MAX_FILTER_LENGTH:
+        raise ValueError(
+            f"Filter string too long ({len(filter_str)} chars, max {_MAX_FILTER_LENGTH}). "
+            "Please simplify your filter."
+        )
+
+    match = _FILTER_BLOCKLIST_RE.search(filter_str)
+    if match:
+        raise ValueError(
+            f"Invalid character or pattern in filter: '{match.group()}'. "
+            "Filters should only contain field:value pairs like 'status:active' or 'created_at:>2024-01-01'."
+        )
+
+    return filter_str.strip()
+
+
 class ShopifyGraphQLClient:
     """Direct Shopify GraphQL Admin API client for analytics queries."""
 
@@ -216,6 +268,9 @@ class ShopifyGraphQLClient:
         Returns:
             Dict with products list, pagination info, and metadata
         """
+        # Validate filter string to prevent injection
+        query = _validate_filter_string(query)
+
         # PRICE sort isn't supported natively — handle client-side
         if sort_key.upper() == "PRICE":
             return await self._products_sorted_by_price(
@@ -384,6 +439,9 @@ class ShopifyGraphQLClient:
             query: Shopify filter string (e.g., "financial_status:paid", "created_at:>2024-01-01")
             after: Pagination cursor
         """
+        # Validate filter string to prevent injection
+        query = _validate_filter_string(query)
+
         sort_key_upper = sort_key.upper()
         if sort_key_upper not in ORDER_SORT_KEYS:
             sort_key_upper = "CREATED_AT"
@@ -455,6 +513,9 @@ class ShopifyGraphQLClient:
             query: Shopify filter string
             after: Pagination cursor
         """
+        # Validate filter string to prevent injection
+        query = _validate_filter_string(query)
+
         sort_key_upper = sort_key.upper()
         if sort_key_upper not in CUSTOMER_SORT_KEYS:
             sort_key_upper = "CREATED_AT"

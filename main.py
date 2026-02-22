@@ -53,6 +53,7 @@ class ShopifyAnalyticsBot:
         self._whatsapp_handler = None
         self._whatsapp_runner = None
         self._running = False
+        self._db_ops: DatabaseOperations | None = None
 
     async def initialize(self) -> bool:
         """Initialize all services and components."""
@@ -86,6 +87,7 @@ class ShopifyAnalyticsBot:
         if not db_ops:
             logger.error("Failed to initialize database")
             return False
+        self._db_ops = db_ops
         logger.info("Database initialized successfully")
 
         # Initialize vector store for semantic search (lazy-loads embedding model)
@@ -207,11 +209,17 @@ class ShopifyAnalyticsBot:
             CommandHandler("link", bot_commands.link_command)
         )
 
-        # Register callback query handler (for inline keyboards)
+        # Register callback query handlers (for inline keyboards)
         self.application.add_handler(
             CallbackQueryHandler(
                 bot_commands.handle_forget_callback,
                 pattern="^forget_",
+            )
+        )
+        self.application.add_handler(
+            CallbackQueryHandler(
+                message_handler.handle_feedback_callback,
+                pattern="^fb_",
             )
         )
 
@@ -291,8 +299,33 @@ class ShopifyAnalyticsBot:
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
 
+        # Start periodic cache cleanup (every 30 minutes)
+        cache_cleanup_task = asyncio.create_task(
+            self._periodic_cache_cleanup()
+        )
+
         await stop_event.wait()
+        cache_cleanup_task.cancel()
         await self.shutdown()
+
+    async def _periodic_cache_cleanup(self, interval_seconds: int = 1800):
+        """Periodically clean up expired analytics cache entries.
+
+        Runs every ``interval_seconds`` (default 30 min) and deletes
+        expired rows from the analytics_cache table to prevent unbounded
+        growth.
+        """
+        while self._running:
+            try:
+                await asyncio.sleep(interval_seconds)
+                if self._db_ops:
+                    deleted = self._db_ops.clear_expired_cache()
+                    if deleted:
+                        logger.info("Cache cleanup: removed %d expired entries", deleted)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning("Cache cleanup error (non-critical)", error=str(e))
 
     async def shutdown(self):
         """Gracefully shut down all services."""

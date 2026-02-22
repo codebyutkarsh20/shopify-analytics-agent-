@@ -9,7 +9,7 @@ import os
 import re
 from typing import List, Tuple, Union
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
 from telegram.ext import ContextTypes
 
@@ -24,7 +24,7 @@ from src.learning.insight_aggregator import InsightAggregator
 from src.bot.channel_adapter import ChannelAdapter
 from src.bot.telegram_adapter import TelegramAdapter
 from src.services.claude_service import ClaudeService
-from src.utils.logger import get_logger
+from src.utils.logger import get_logger, new_correlation_id
 from src.utils.formatters import format_error_message, markdown_to_telegram_html
 from src.utils.rate_limiter import RateLimiter
 
@@ -125,6 +125,9 @@ class MessageHandler:
             update: The update object
             context: The context object
         """
+        # Generate a correlation ID for tracing this request across all log lines
+        cid = new_correlation_id()
+
         telegram_user_id = update.effective_user.id
         message_text = update.message.text
         message_length = len(message_text) if message_text else 0
@@ -336,7 +339,7 @@ class MessageHandler:
 
             # Step 9: Save conversation (with session_id, channel_type, tool_calls)
             tool_calls_json = self.claude_service.last_tool_calls_json
-            self.db_ops.save_conversation(
+            conversation = self.db_ops.save_conversation(
                 user_id=user.id,
                 message=message_text,
                 response=response,
@@ -345,6 +348,10 @@ class MessageHandler:
                 channel_type=channel_type,
                 tool_calls_json=tool_calls_json,
             )
+
+            # Step 9.5: Send feedback buttons (👍/👎)
+            await self._send_feedback_buttons(update, conversation.id)
+
             logger.info(
                 "Message processed successfully",
                 user_id=user.id,
@@ -621,6 +628,101 @@ class MessageHandler:
                 await self._send_chart_photo(update, segment[1])
             elif isinstance(segment, str):
                 await self._send_text_chunk(update, segment)
+
+    # ── Explicit feedback (👍 / 👎 buttons) ──────────────────────
+
+    async def _send_feedback_buttons(self, update: Update, conversation_id: int) -> None:
+        """Send a compact inline keyboard with 👍/👎 after the bot's response.
+
+        The callback data encodes the conversation ID so the handler knows
+        which response the user is rating.
+        """
+        try:
+            keyboard = InlineKeyboardMarkup(
+                [[
+                    InlineKeyboardButton("👍", callback_data=f"fb_up_{conversation_id}"),
+                    InlineKeyboardButton("👎", callback_data=f"fb_down_{conversation_id}"),
+                ]]
+            )
+            await update.message.reply_text(
+                "Was this helpful?",
+                reply_markup=keyboard,
+            )
+        except Exception as e:
+            # Non-critical — don't break the flow if buttons fail
+            logger.debug("Failed to send feedback buttons", error=str(e))
+
+    async def handle_feedback_callback(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """Handle 👍 / 👎 button presses from users.
+
+        Callback data format: ``fb_up_<conversation_id>`` or ``fb_down_<conversation_id>``
+
+        Actions:
+        1. Save explicit feedback to ``response_feedback`` table
+        2. Update ``response_quality_score`` on the conversation
+        3. Adjust template confidence if a template was used
+        4. Acknowledge the user with a brief confirmation
+        """
+        query = update.callback_query
+        await query.answer()  # dismiss the loading spinner on the button
+
+        data = query.data  # e.g. "fb_up_42" or "fb_down_42"
+        user_id = update.effective_user.id
+
+        try:
+            parts = data.split("_", 2)  # ["fb", "up"/"down", "<conv_id>"]
+            direction = parts[1]  # "up" or "down"
+            conversation_id = int(parts[2])
+
+            is_positive = direction == "up"
+            quality_score = 1.0 if is_positive else -1.0
+            feedback_type = "explicit_thumbs_up" if is_positive else "explicit_thumbs_down"
+
+            # 1. Save feedback
+            self.db_ops.save_response_feedback(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                feedback_type=feedback_type,
+                quality_score=quality_score,
+                signal_text="👍" if is_positive else "👎",
+            )
+
+            # 2. Update conversation quality
+            self.db_ops.update_conversation_quality(
+                conversation_id=conversation_id,
+                quality_score=quality_score,
+            )
+
+            # 3. Adjust template confidence if a template was used
+            if self.template_manager:
+                convs = self.db_ops.get_latest_conversation(user_id, limit=5)
+                for conv in convs:
+                    if conv.id == conversation_id and conv.template_id_used:
+                        self.template_manager.update_template_quality(
+                            template_id=conv.template_id_used,
+                            quality_score=quality_score,
+                        )
+                        break
+
+            # 4. Update the message to show the user's choice
+            emoji = "👍" if is_positive else "👎"
+            await query.edit_message_text(f"Thanks for the feedback! {emoji}")
+
+            logger.info(
+                "Explicit feedback received",
+                user_id=user_id,
+                conversation_id=conversation_id,
+                feedback=direction,
+            )
+
+        except (ValueError, IndexError) as e:
+            logger.warning("Invalid feedback callback data", data=data, error=str(e))
+        except Exception as e:
+            logger.error("Error processing feedback", error=str(e), exc_info=True)
 
     async def _handle_error(
         self,

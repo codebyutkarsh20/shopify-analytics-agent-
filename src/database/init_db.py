@@ -3,6 +3,7 @@
 import logging
 from typing import Optional
 
+import sqlalchemy.exc
 from sqlalchemy import text, inspect
 from src.database.models import Base
 from src.database.operations import DatabaseOperations
@@ -14,7 +15,7 @@ def _get_column_type_sql(column) -> str:
     """Get SQLite-compatible column type from a SQLAlchemy column."""
     try:
         col_type = str(column.type)
-    except Exception:
+    except (AttributeError, TypeError, NotImplementedError):
         col_type = "TEXT"
 
     type_map = {
@@ -63,7 +64,7 @@ def _migrate_missing_columns(engine) -> None:
                     conn.commit()
                 logger.info(f"Migration: added column {table_name}.{col.name} ({col_type})")
                 migrations_applied += 1
-            except Exception as e:
+            except (sqlalchemy.exc.OperationalError, sqlalchemy.exc.ProgrammingError) as e:
                 logger.warning(f"Failed to add column {table_name}.{col.name}: {e}")
 
     if migrations_applied:
@@ -110,21 +111,21 @@ def init_database(database_url: Optional[str] = None) -> DatabaseOperations:
                 conn.execute(text("ALTER TABLE mcp_tool_usage RENAME TO tool_usage"))
                 conn.commit()
             logger.info("Migrated table: mcp_tool_usage → tool_usage")
-    except Exception as e:
-        logger.warning("Table migration check failed (safe to ignore on fresh DB)")
+    except (sqlalchemy.exc.OperationalError, sqlalchemy.exc.ProgrammingError) as e:
+        logger.warning("Table migration check failed (safe to ignore on fresh DB)", error=str(e))
 
     # Migration: add any missing columns to existing tables
     try:
         _migrate_missing_columns(db_ops.engine)
-    except Exception as e:
+    except (sqlalchemy.exc.OperationalError, sqlalchemy.exc.ProgrammingError) as e:
         logger.warning(f"Column migration check failed: {e}")
 
     # Seed query templates on first run
     try:
         from src.learning.template_seeds import seed_templates
         seed_templates(db_ops)
-    except Exception as e:
-        logger.warning("Template seeding failed")
+    except (ImportError, sqlalchemy.exc.OperationalError, ValueError) as e:
+        logger.warning("Template seeding failed", error=str(e))
 
     return db_ops
 

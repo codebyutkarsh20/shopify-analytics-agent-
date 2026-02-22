@@ -97,10 +97,14 @@ def decrypt_token(ciphertext: str) -> str:
     try:
         f = _get_fernet()
         return f.decrypt(ciphertext.encode()).decode()
-    except (InvalidToken, Exception):
+    except InvalidToken:
         # Not encrypted — legacy plaintext token.  Return as-is so the
         # migration path works transparently.
         logger.debug("Token appears to be legacy plaintext; returning as-is")
+        return ciphertext
+    except RuntimeError:
+        # ENCRYPTION_KEY not set — can't decrypt, return as-is
+        logger.warning("ENCRYPTION_KEY not set; returning token as-is")
         return ciphertext
 
 

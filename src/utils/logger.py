@@ -3,15 +3,22 @@ Structured logging utilities using structlog.
 
 This module provides structured logging configuration and a factory function
 for creating loggers across the application. Includes automatic redaction
-of sensitive values (API keys, tokens, passwords).
+of sensitive values (API keys, tokens, passwords) and request correlation IDs.
 """
 
+import contextvars
 import logging
 import re
 import sys
+import uuid
 from pathlib import Path
 
 import structlog
+
+# Correlation ID for tracking requests across the processing pipeline
+correlation_id_var: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "correlation_id", default=""
+)
 
 
 # Patterns that indicate sensitive values
@@ -50,6 +57,29 @@ def _redact_processor(logger, method_name, event_dict):
     return event_dict
 
 
+def _correlation_id_processor(logger, method_name, event_dict):
+    """Structlog processor that injects the current correlation ID into log events."""
+    cid = correlation_id_var.get("")
+    if cid:
+        event_dict["correlation_id"] = cid
+    return event_dict
+
+
+def new_correlation_id() -> str:
+    """Generate a new correlation ID and set it in the current context.
+
+    Call this at the start of each incoming message/request to create a
+    unique ID that will be attached to every log line produced while
+    processing that request.
+
+    Returns:
+        The generated correlation ID (8-char hex).
+    """
+    cid = uuid.uuid4().hex[:8]
+    correlation_id_var.set(cid)
+    return cid
+
+
 def setup_logging(level: str = "INFO", log_file: str = None) -> None:
     """
     Configure structured logging with console and optional file output.
@@ -83,6 +113,7 @@ def setup_logging(level: str = "INFO", log_file: str = None) -> None:
             structlog.processors.StackInfoRenderer(),
             structlog.processors.format_exc_info,
             structlog.processors.UnicodeDecoder(),
+            _correlation_id_processor,  # Inject correlation ID
             _redact_processor,  # Redact sensitive values before rendering
             structlog.processors.JSONRenderer(),
         ],
