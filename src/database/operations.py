@@ -2554,18 +2554,37 @@ class DatabaseOperations:
             # ── Step 1: Copy channel identifiers to the kept user ──
             if target_channel == "whatsapp" and merge_user.whatsapp_phone:
                 wp = merge_user.whatsapp_phone
-                merge_user.whatsapp_phone = None  # Clear to avoid unique constraint
-                session.commit()                  # Force SQLite to release the lock
-                session.refresh(keep_user)        # Refresh bound objects
-                session.refresh(merge_user)
-                keep_user.whatsapp_phone = wp
+                # 1. Clear it on the merged user via raw SQL to bypass ORM batching
+                session.execute(
+                    User.__table__.update()
+                    .where(User.id == merge_user_id)
+                    .values(whatsapp_phone=None)
+                )
+                # 2. Assign it to keep user via raw SQL
+                session.execute(
+                    User.__table__.update()
+                    .where(User.id == keep_user_id)
+                    .values(whatsapp_phone=wp)
+                )
             elif target_channel == "telegram" and merge_user.telegram_user_id:
                 tg = merge_user.telegram_user_id
-                merge_user.telegram_user_id = None
-                session.commit()
-                session.refresh(keep_user)
-                session.refresh(merge_user)
-                keep_user.telegram_user_id = tg
+                session.execute(
+                    User.__table__.update()
+                    .where(User.id == merge_user_id)
+                    .values(telegram_user_id=None)
+                )
+                session.execute(
+                    User.__table__.update()
+                    .where(User.id == keep_user_id)
+                    .values(telegram_user_id=tg)
+                )
+
+            # Hard commit the raw ID shift immediately
+            session.commit()
+            
+            # Refresh our local objects so they recognize the new IDs
+            session.refresh(keep_user)
+            session.refresh(merge_user)
 
             # Copy display info if the kept user is missing it
             if not keep_user.first_name and merge_user.first_name:
