@@ -67,11 +67,19 @@ class ShopifyGraphQLClient:
             "X-Shopify-Access-Token": self.access_token,
             "Content-Type": "application/json",
         }
+        self._client = httpx.AsyncClient(
+            timeout=30.0,
+            limits=httpx.Limits(max_keepalive_connections=20, max_connections=40)
+        )
         logger.info(
             "ShopifyGraphQLClient initialized",
             shop_domain=self.shop_domain,
             api_version=self.api_version,
         )
+
+    async def close(self):
+        """Close the underlying HTTPX client."""
+        await self._client.aclose()
 
     async def execute_query(
         self, query: str, variables: Optional[Dict] = None
@@ -83,28 +91,27 @@ class ShopifyGraphQLClient:
 
         logger.debug("Executing GraphQL query", variables=variables)
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                self.endpoint,
-                headers=self.headers,
-                json=payload,
-            )
-            response.raise_for_status()
-            data = response.json()
+        response = await self._client.post(
+            self.endpoint,
+            headers=self.headers,
+            json=payload,
+        )
+        response.raise_for_status()
+        data = response.json()
 
-            if "errors" in data:
+        if "errors" in data:
                 error_messages = [
                     e.get("message", str(e)) for e in data["errors"]
                 ]
                 logger.error("GraphQL errors", errors=error_messages)
                 raise ValueError(f"GraphQL errors: {'; '.join(error_messages)}")
 
-            result = data.get("data", {})
+        result = data.get("data", {})
 
-            # ── Convert ALL Shopify UTC timestamps to IST at the gateway ──
-            self._convert_all_timestamps_to_ist(result)
+        # ── Convert ALL Shopify UTC timestamps to IST at the gateway ──
+        self._convert_all_timestamps_to_ist(result)
 
-            return result
+        return result
 
     # ── Centralized UTC → IST conversion ────────────────────────────
 

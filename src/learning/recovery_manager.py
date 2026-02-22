@@ -221,7 +221,14 @@ class RecoveryManager:
         elif tool_name == "shopify_graphql":
             # For GraphQL, capture query start
             query = tool_params.get("query", "")
-            normalized["query_start"] = query.strip()[:50]
+            
+            # Make the query fuzzy to match queries despite different generated IDs or variable string inputs
+            import re
+            query_clean = re.sub(r'\s+', ' ', query).strip()
+            query_clean = re.sub(r'gid://shopify/\w+/\d+', 'ID', query_clean)
+            query_clean = re.sub(r'["\'][^"\']*["\']', 'STRING', query_clean)
+            
+            normalized["query_start"] = query_clean[:50]
 
         fingerprint_str = json.dumps(normalized, sort_keys=True)
         return hashlib.md5(fingerprint_str.encode()).hexdigest()

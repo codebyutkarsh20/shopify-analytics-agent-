@@ -128,6 +128,34 @@ class MetaWhatsAppClient:
                 logger.error("Meta API send_image failed", status=resp.status, body=data)
             return data
 
+    async def send_typing_indicator(self, to: str) -> None:
+        """Send a typing indicator ('typing...' bubble) to a WhatsApp user.
+
+        Uses the Meta Cloud API messages endpoint with status=typing.
+        Silently ignores errors so it never blocks message processing.
+        """
+        try:
+            session = await self._get_session()
+            url = f"{self.BASE_URL}/{self.phone_number_id}/messages"
+            payload = {
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": to,
+                "type": "text",
+                "status": "typing",
+            }
+            async with session.post(url, json=payload) as resp:
+                if resp.status != 200:
+                    # Non-critical – log and move on
+                    data = await resp.json()
+                    logger.debug(
+                        "Typing indicator failed (non-critical)",
+                        status=resp.status,
+                        body=data,
+                    )
+        except Exception as exc:
+            logger.debug("Typing indicator error (ignored)", error=str(exc))
+
     async def close(self):
         if self._session and not self._session.closed:
             await self._session.close()
@@ -541,6 +569,10 @@ class WhatsAppWebhookHandler:
             # Step 5: Feedback analysis
             if self.feedback_analyzer:
                 self._analyze_feedback(user.id, message_text, query_type)
+
+            # Step 5.5: Show typing indicator while processing
+            if hasattr(self._client, "send_typing_indicator"):
+                await self._client.send_typing_indicator(from_number)
 
             # Step 6: Process through LLM
             response = await self.llm_service.process_message(
