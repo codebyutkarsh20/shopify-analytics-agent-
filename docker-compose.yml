@@ -12,9 +12,10 @@ services:
     env_file:
       - .env
 
-    # Expose WhatsApp webhook port (only needed if WHATSAPP_ENABLED=true)
+    # Expose WhatsApp webhook port + admin dashboard port
     ports:
       - "${WHATSAPP_WEBHOOK_PORT:-8080}:${WHATSAPP_WEBHOOK_PORT:-8080}"
+      - "${ADMIN_DASHBOARD_PORT:-8501}:${ADMIN_DASHBOARD_PORT:-8501}"
 
     # Persist database and logs outside the container
     volumes:
@@ -25,10 +26,10 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1024M
+          memory: 1536M
           cpus: "1.0"
         reservations:
-          memory: 512M
+          memory: 640M
           cpus: "0.25"
 
     # Logging configuration

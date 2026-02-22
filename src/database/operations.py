@@ -2120,6 +2120,33 @@ class DatabaseOperations:
         finally:
             session.close()
 
+    def update_conversation_sub_scores(
+        self,
+        conversation_id: int,
+        sub_scores: dict,
+    ) -> None:
+        """Persist multi-factor quality sub-scores on a conversation.
+
+        Args:
+            conversation_id: Conversation ID.
+            sub_scores: Dict with keys: completeness, sentiment, tool_performance, composite, reasoning.
+        """
+        import json
+
+        session = self.get_session()
+        try:
+            conv = session.execute(
+                select(Conversation).where(Conversation.id == conversation_id)
+            ).scalar_one_or_none()
+            if conv:
+                conv.quality_completeness_score = sub_scores.get("completeness")
+                conv.quality_sentiment_score = sub_scores.get("sentiment")
+                conv.quality_tool_score = sub_scores.get("tool_performance")
+                conv.quality_factors_json = json.dumps(sub_scores)
+                session.commit()
+        finally:
+            session.close()
+
     # ==================== Channel Session Operations ====================
 
     def get_or_create_channel_session(

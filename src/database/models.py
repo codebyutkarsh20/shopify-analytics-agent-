@@ -15,6 +15,27 @@ class Base(DeclarativeBase):
 
 
 # ---------------------------------------------------------------------------
+# Admin dashboard models
+# ---------------------------------------------------------------------------
+
+class AdminUser(Base):
+    """Admin user for the dashboard."""
+
+    __tablename__ = "admin_users"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    username: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    must_change_password: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist, nullable=False)
+    last_login: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<AdminUser(id={self.id}, username={self.username})>"
+
+
+# ---------------------------------------------------------------------------
 # Core identity models
 # ---------------------------------------------------------------------------
 
@@ -173,6 +194,10 @@ class Conversation(Base):
     channel_type: Mapped[str] = mapped_column(String(50), default="telegram", nullable=False)
     tool_calls_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     response_quality_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    quality_completeness_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    quality_sentiment_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    quality_tool_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    quality_factors_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     template_id_used: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist, nullable=False, index=True)
 

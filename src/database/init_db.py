@@ -127,7 +127,48 @@ def init_database(database_url: Optional[str] = None) -> DatabaseOperations:
     except (ImportError, sqlalchemy.exc.OperationalError, ValueError) as e:
         logger.warning("Template seeding failed", error=str(e))
 
+    # Seed default admin user for the dashboard
+    try:
+        _seed_default_admin(db_ops)
+    except Exception as e:
+        logger.warning("Admin user seeding failed (non-critical)", exc_info=e)
+
     return db_ops
+
+
+def _seed_default_admin(db_ops: DatabaseOperations) -> None:
+    """Create the default admin account if none exists yet."""
+    from src.config.settings import settings
+    from src.database.models import AdminUser
+
+    if not settings.admin_dashboard.enabled:
+        return
+
+    session = db_ops.get_session()
+    try:
+        existing = session.execute(
+            text("SELECT COUNT(*) FROM admin_users")
+        ).scalar()
+        if existing and existing > 0:
+            return  # At least one admin exists — skip seeding
+
+        # Create default admin with must_change_password=True
+        import bcrypt as _bcrypt
+
+        username = settings.admin_dashboard.default_username
+        password = settings.admin_dashboard.default_password
+        pw_hash = _bcrypt.hashpw(password.encode(), _bcrypt.gensalt()).decode()
+
+        admin = AdminUser(
+            username=username,
+            password_hash=pw_hash,
+            must_change_password=True,
+        )
+        session.add(admin)
+        session.commit()
+        logger.info("Default admin user created (username=%s, must_change_password=True)", username)
+    finally:
+        session.close()
 
 
 def check_database(database_url: Optional[str] = None) -> bool:

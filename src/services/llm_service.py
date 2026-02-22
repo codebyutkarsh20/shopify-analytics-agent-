@@ -501,6 +501,19 @@ class LLMService(ABC):
                 tool_name=tool_name,
                 execution_time_ms=execution_time_ms,
             )
+
+            # Log successful tool usage
+            try:
+                self.db_ops.log_tool_usage(
+                    user_id=0,
+                    tool_name=tool_name,
+                    parameters=json.dumps(tool_input, default=str)[:2000],
+                    success=True,
+                    execution_time_ms=execution_time_ms,
+                )
+            except Exception as log_error:
+                logger.warning("Failed to log tool usage", error=str(log_error))
+
             return result_json
 
         except Exception as e:

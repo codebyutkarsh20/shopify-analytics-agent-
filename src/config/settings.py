@@ -168,6 +168,24 @@ class SecurityConfig:
 
 
 @dataclass
+class AdminDashboardConfig:
+    """Admin dashboard settings."""
+    enabled: bool = False
+    port: int = 8501
+    jwt_secret: str = ""
+    default_username: str = "admin"
+    default_password: str = "admin123"
+
+    def __post_init__(self):
+        self.enabled = os.getenv("ADMIN_DASHBOARD_ENABLED", "false").lower() in ("true", "1", "yes")
+        port_str = os.getenv("ADMIN_DASHBOARD_PORT", str(self.port))
+        self.port = int(port_str) if port_str.isdigit() else self.port
+        self.jwt_secret = os.getenv("ADMIN_JWT_SECRET", self.jwt_secret)
+        self.default_username = os.getenv("ADMIN_DEFAULT_USERNAME", self.default_username)
+        self.default_password = os.getenv("ADMIN_DEFAULT_PASSWORD", self.default_password)
+
+
+@dataclass
 class Settings:
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     whatsapp: WhatsAppConfig = field(default_factory=WhatsAppConfig)
@@ -178,6 +196,7 @@ class Settings:
     mcp: MCPConfig = field(default_factory=MCPConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     security: SecurityConfig = field(default_factory=SecurityConfig)
+    admin_dashboard: AdminDashboardConfig = field(default_factory=AdminDashboardConfig)
     llm_provider: str = ""
 
     # Timezone

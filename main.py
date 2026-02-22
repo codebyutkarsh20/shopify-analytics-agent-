@@ -52,6 +52,7 @@ class ShopifyAnalyticsBot:
         self.application: Application | None = None
         self._whatsapp_handler = None
         self._whatsapp_runner = None
+        self._admin_server = None
         self._running = False
         self._db_ops: DatabaseOperations | None = None
 
@@ -287,6 +288,28 @@ class ShopifyAnalyticsBot:
         else:
             print("  💬 WhatsApp channel: disabled")
 
+        # Start admin dashboard (if enabled)
+        if settings.admin_dashboard.enabled and self._db_ops:
+            try:
+                import uvicorn
+                from src.admin.app import create_admin_app
+
+                admin_app = create_admin_app(self._db_ops)
+                config = uvicorn.Config(
+                    admin_app,
+                    host="0.0.0.0",
+                    port=settings.admin_dashboard.port,
+                    log_level="warning",
+                )
+                self._admin_server = uvicorn.Server(config)
+                asyncio.create_task(self._admin_server.serve())
+                print(f"  🖥️  Admin dashboard: active (http://localhost:{settings.admin_dashboard.port})")
+            except Exception as e:
+                logger.warning("Failed to start admin dashboard", error=str(e))
+                print(f"  🖥️  Admin dashboard: failed to start ({e})")
+        else:
+            print("  🖥️  Admin dashboard: disabled")
+
         print("\nPress Ctrl+C to stop.\n")
 
         # Keep running until stopped
@@ -344,6 +367,10 @@ class ShopifyAnalyticsBot:
         if self._whatsapp_runner:
             await self._whatsapp_runner.cleanup()
             logger.info("WhatsApp webhook server stopped")
+
+        if self._admin_server:
+            self._admin_server.should_exit = True
+            logger.info("Admin dashboard stopped")
 
         logger.info("Bot shutdown complete")
         print("\n👋 Bot stopped. Goodbye!")

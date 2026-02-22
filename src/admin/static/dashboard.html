@@ -1,0 +1,887 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Shopify Analytics Dashboard</title>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/history@5/umd/history.production.min.js"></script>
+    <script src="https://unpkg.com/react-router@6.3.0/umd/react-router.production.min.js"></script>
+    <script src="https://unpkg.com/react-router-dom@6.3.0/umd/react-router-dom.production.min.js"></script>
+    <script src="https://unpkg.com/chart.js@3.9.1/dist/chart.min.js"></script>
+    <style>
+        *{margin:0;padding:0;box-sizing:border-box}
+        :root{
+            --bg:#0a0e1a;--bg2:#111827;--bg3:#1a2236;--bg4:#243050;
+            --tx:#f0f2f8;--tx2:#8b97b8;--tx3:#5c6a8a;
+            --ac:#6366f1;--ac2:#818cf8;--ac3:#4f46e5;
+            --green:#10b981;--green-bg:rgba(16,185,129,.12);
+            --red:#f43f5e;--red-bg:rgba(244,63,94,.12);
+            --yellow:#f59e0b;--yellow-bg:rgba(245,158,11,.12);
+            --cyan:#06b6d4;--cyan-bg:rgba(6,182,212,.12);
+            --purple:#a78bfa;--purple-bg:rgba(167,139,250,.12);
+            --border:#1e2a42;--border2:#2a3655;
+            --radius:10px;
+        }
+        body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--tx);line-height:1.5;font-size:14px}
+        .app{display:flex;height:100vh;overflow:hidden}
+
+        /* Sidebar */
+        .side{width:240px;background:var(--bg2);border-right:1px solid var(--border);display:flex;flex-direction:column;flex-shrink:0}
+        .side-logo{padding:20px;border-bottom:1px solid var(--border);font-size:18px;font-weight:700;color:var(--ac2);display:flex;align-items:center;gap:10px}
+        .side-logo span{font-size:22px}
+        .side-nav{padding:12px 0;flex:1}
+        .side-label{padding:8px 20px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1.2px;color:var(--tx3)}
+        .side-link{display:flex;align-items:center;gap:12px;padding:10px 20px;color:var(--tx2);text-decoration:none;font-size:13px;font-weight:500;border-left:3px solid transparent;transition:all .15s}
+        .side-link:hover{background:rgba(99,102,241,.08);color:var(--tx)}
+        .side-link.on{background:rgba(99,102,241,.12);color:var(--ac2);border-left-color:var(--ac)}
+        .side-link .ico{font-size:16px;width:22px;text-align:center}
+        .side-bottom{padding:16px 20px;border-top:1px solid var(--border)}
+        .side-bottom button{background:none;border:none;color:var(--red);cursor:pointer;font-size:13px;font-weight:500;display:flex;align-items:center;gap:8px;padding:4px 0;width:100%}
+        .side-bottom button:hover{color:#fb7185}
+
+        /* Main */
+        .main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0}
+        .topbar{background:var(--bg2);border-bottom:1px solid var(--border);padding:0 28px;height:56px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
+        .topbar h2{font-size:16px;font-weight:600;color:var(--tx)}
+        .topbar-right{display:flex;align-items:center;gap:12px}
+        .topbar-user{font-size:12px;color:var(--tx2);background:var(--bg3);padding:6px 14px;border-radius:20px}
+        .content{flex:1;overflow-y:auto;padding:24px 28px}
+        .page{max-width:1400px;margin:0 auto}
+
+        /* Stats row */
+        .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin-bottom:24px}
+        .stat{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:18px;position:relative;overflow:hidden}
+        .stat::before{content:'';position:absolute;top:0;left:0;width:4px;height:100%;background:var(--ac);border-radius:4px 0 0 4px}
+        .stat.green::before{background:var(--green)} .stat.red::before{background:var(--red)}
+        .stat.yellow::before{background:var(--yellow)} .stat.cyan::before{background:var(--cyan)}
+        .stat-label{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.8px;color:var(--tx3);margin-bottom:6px}
+        .stat-val{font-size:26px;font-weight:700;color:var(--tx)}
+        .stat-sub{font-size:11px;color:var(--tx2);margin-top:2px}
+
+        /* Cards */
+        .card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:20px;overflow:hidden}
+        .card-head{padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+        .card-head h3{font-size:14px;font-weight:600;color:var(--tx)}
+        .card-head .count{font-size:12px;color:var(--tx2);background:var(--bg3);padding:2px 10px;border-radius:12px}
+        .card-body{padding:16px 20px}
+
+        /* Tables */
+        .tbl{width:100%;border-collapse:collapse}
+        .tbl th{padding:10px 14px;text-align:left;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;color:var(--tx3);background:var(--bg3);border-bottom:1px solid var(--border)}
+        .tbl th.sort{cursor:pointer;user-select:none}.tbl th.sort:hover{color:var(--ac2)}
+        .tbl td{padding:12px 14px;border-bottom:1px solid var(--border);color:var(--tx);font-size:13px;vertical-align:top}
+        .tbl tbody tr{transition:background .1s}.tbl tbody tr:hover{background:rgba(99,102,241,.05);cursor:pointer}
+        .tbl tbody tr:last-child td{border-bottom:none}
+
+        /* Message bubbles */
+        .msg-preview{max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--tx2);font-size:12px}
+        .chat-bubble{margin-bottom:14px;padding:14px 16px;border-radius:12px;font-size:13px;line-height:1.6;white-space:pre-wrap;word-wrap:break-word}
+        .chat-user{background:var(--bg3);border:1px solid var(--border2);border-bottom-left-radius:4px;margin-right:40px}
+        .chat-bot{background:linear-gradient(135deg,rgba(99,102,241,.1),rgba(6,182,212,.08));border:1px solid rgba(99,102,241,.2);border-bottom-right-radius:4px;margin-left:40px}
+        .chat-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;display:block}
+        .chat-label.user{color:var(--yellow)}.chat-label.bot{color:var(--ac2)}
+
+        /* Feedback items */
+        .fb-item{display:flex;gap:14px;padding:14px 0;border-bottom:1px solid var(--border)}
+        .fb-item:last-child{border-bottom:none}
+        .fb-icon{width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0}
+        .fb-icon.pos{background:var(--green-bg)}.fb-icon.neg{background:var(--red-bg)}.fb-icon.neut{background:var(--yellow-bg)}
+        .fb-body{flex:1;min-width:0}
+        .fb-type{font-size:12px;font-weight:600;color:var(--tx);margin-bottom:2px}
+        .fb-text{font-size:12px;color:var(--tx2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+        .fb-meta{font-size:11px;color:var(--tx3);margin-top:4px}
+        .fb-score{font-size:12px;font-weight:700;padding:2px 8px;border-radius:4px}
+        .fb-score.pos{color:var(--green);background:var(--green-bg)}.fb-score.neg{color:var(--red);background:var(--red-bg)}.fb-score.neut{color:var(--yellow);background:rgba(250,204,21,0.12)}
+
+        /* Badges */
+        .badge{display:inline-block;padding:3px 10px;border-radius:4px;font-size:11px;font-weight:600}
+        .badge-tg{background:rgba(6,182,212,.12);color:var(--cyan)}
+        .badge-wa{background:var(--green-bg);color:var(--green)}
+        .badge-ok{background:var(--green-bg);color:var(--green)}
+        .badge-err{background:var(--red-bg);color:var(--red)}
+        .badge-warn{background:var(--yellow-bg);color:var(--yellow)}
+        .badge-info{background:var(--purple-bg);color:var(--purple)}
+        .badge-q{background:rgba(99,102,241,.12);color:var(--ac2);font-size:10px}
+
+        /* Filters */
+        .filters{display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap;align-items:end}
+        .flt{display:flex;flex-direction:column;gap:4px}
+        .flt label{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.8px;color:var(--tx3)}
+        .flt select,.flt input[type=date],.flt input[type=text]{padding:7px 12px;background:var(--bg3);border:1px solid var(--border2);color:var(--tx);border-radius:6px;font-size:12px}
+        .flt select:focus,.flt input:focus{outline:none;border-color:var(--ac)}
+
+        /* Pagination */
+        .pag{display:flex;align-items:center;justify-content:center;gap:6px;padding:16px 0}
+        .pag button{padding:6px 12px;background:var(--bg3);border:1px solid var(--border2);color:var(--tx);border-radius:6px;cursor:pointer;font-size:12px;transition:all .15s}
+        .pag button:hover:not(:disabled){background:var(--bg4);border-color:var(--ac)}
+        .pag button.on{background:var(--ac);border-color:var(--ac);color:#fff}
+        .pag button:disabled{opacity:.4;cursor:not-allowed}
+        .pag span{font-size:12px;color:var(--tx2);margin:0 8px}
+
+        /* Chart */
+        .chart-wrap{position:relative;height:260px;padding:16px 20px}
+        .chart-wrap canvas{width:100%!important;height:100%!important}
+
+        /* Modal */
+        .overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;justify-content:center;align-items:flex-start;padding-top:60px;z-index:2000;overflow-y:auto}
+        .modal{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);width:90%;max-width:720px;margin-bottom:60px;box-shadow:0 24px 48px rgba(0,0,0,.4)}
+        .modal-head{padding:18px 22px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}
+        .modal-head h3{font-size:15px;font-weight:600}.modal-head button{background:none;border:none;color:var(--tx2);font-size:18px;cursor:pointer}
+        .modal-body{padding:22px}
+
+        /* Detail fields */
+        .df{margin-bottom:16px}.df-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--tx3);margin-bottom:5px}
+        .df-val{font-size:13px;color:var(--tx)}
+
+        /* Grid layouts */
+        .grid2{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+        .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px}
+        @media(max-width:900px){.grid2,.grid3{grid-template-columns:1fr}}
+
+        /* Login */
+        .login-wrap{display:flex;justify-content:center;align-items:center;min-height:100vh;background:linear-gradient(135deg,#0a0e1a,#111827)}
+        .login-box{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:36px;width:100%;max-width:380px;box-shadow:0 20px 40px rgba(0,0,0,.4)}
+        .login-box h1{text-align:center;font-size:24px;color:var(--ac2);margin-bottom:8px}
+        .login-box p{text-align:center;font-size:13px;color:var(--tx2);margin-bottom:24px}
+        .fg{margin-bottom:16px}.fg label{display:block;font-size:12px;font-weight:600;color:var(--tx2);margin-bottom:6px}
+        .fg input{width:100%;padding:10px 14px;background:var(--bg3);border:1px solid var(--border2);color:var(--tx);border-radius:8px;font-size:14px}
+        .fg input:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px rgba(99,102,241,.15)}
+        .btn{padding:10px 18px;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;transition:all .15s;display:inline-flex;align-items:center;gap:6px}
+        .btn-primary{background:var(--ac);color:#fff;width:100%}.btn-primary:hover{background:var(--ac3)}
+        .btn-primary:disabled{opacity:.5;cursor:not-allowed}
+        .btn-sm{padding:6px 12px;font-size:11px;border-radius:6px}
+        .btn-ghost{background:transparent;color:var(--tx2);border:1px solid var(--border2)}.btn-ghost:hover{background:var(--bg3);color:var(--tx)}
+        .alert{padding:10px 14px;border-radius:8px;margin-bottom:14px;font-size:13px}
+        .alert-err{background:var(--red-bg);color:#fb7185;border:1px solid rgba(244,63,94,.2)}
+        .alert-ok{background:var(--green-bg);color:#6ee7b7;border:1px solid rgba(16,185,129,.2)}
+
+        /* Loading */
+        .loading{text-align:center;padding:60px;color:var(--tx2)}
+        .spin{display:inline-block;width:32px;height:32px;border:3px solid var(--border);border-top-color:var(--ac);border-radius:50%;animation:sp .8s linear infinite}
+        @keyframes sp{to{transform:rotate(360deg)}}
+        .empty{text-align:center;padding:40px;color:var(--tx2)}
+        .empty .ico{font-size:36px;margin-bottom:10px}
+        .empty h4{font-size:15px;color:var(--tx);margin-bottom:4px}
+
+        /* Scrollbar */
+        ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:var(--bg)}::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
+        @media(max-width:768px){
+            .side{display:none}.content{padding:16px}.stats{grid-template-columns:1fr 1fr}.grid2{grid-template-columns:1fr}
+        }
+    </style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+const{useState,useEffect,useRef,useCallback}=React;
+const{HashRouter,Routes,Route,useNavigate,useLocation}=window.ReactRouterDOM;
+const e=React.createElement;
+
+/* ── API ── */
+const api={
+    async req(ep,opts={}){
+        const r=await fetch('/api'+ep,{credentials:'include',...opts});
+        if(!r.ok){const err=new Error('API '+r.status);err.status=r.status;throw err}
+        return r.json()
+    },
+    auth:{
+        me:()=>api.req('/auth/me'),
+        login:(u,p)=>api.req('/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,password:p})}),
+        logout:()=>api.req('/auth/logout',{method:'POST'}),
+        changePw:(cur,nw)=>api.req('/auth/change-password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({current_password:cur,new_password:nw})}),
+    },
+    users:{list:(p=1,l=20,sb='last_active',o='desc')=>api.req(`/users?page=${p}&limit=${l}&sort_by=${sb}&order=${o}`),get:id=>api.req(`/users/${id}`)},
+    conv:{
+        list:(p=1,l=30,f={})=>{const q=new URLSearchParams({page:p,limit:l,...f});return api.req('/conversations?'+q)},
+        get:id=>api.req('/conversations/'+id)
+    },
+    sessions:{
+        list:(p=1,l=20,f={})=>{const q=new URLSearchParams({page:p,limit:l,...f});return api.req('/sessions?'+q)},
+        get:id=>api.req('/sessions/'+id)
+    },
+    analytics:{
+        feedback:(d=30)=>api.req('/analytics/feedback?days='+d),
+        channels:(d=30)=>api.req('/analytics/channels?days='+d),
+        tools:(d=30)=>api.req('/analytics/tools?days='+d),
+        errors:(d=30)=>api.req('/analytics/errors?days='+d),
+    },
+    mon:{health:()=>api.req('/monitoring/health'),stats:()=>api.req('/monitoring/stats')},
+};
+
+/* ── Auth Context ── */
+const Ctx=React.createContext();
+function AuthProv({children}){
+    const[user,setUser]=useState(null);const[ld,setLd]=useState(true);
+    useEffect(()=>{api.auth.me().then(d=>setUser(d)).catch(()=>setUser(null)).finally(()=>setLd(false))},[]);
+    const login=async(u,p)=>{const d=await api.auth.login(u,p);await api.auth.me().then(m=>setUser(m));return d};
+    const logout=async()=>{try{await api.auth.logout()}finally{setUser(null)}};
+    const changePw=async(c,n)=>{await api.auth.changePw(c,n);setUser({...user,must_change_password:false})};
+    return e(Ctx.Provider,{value:{user,ld,login,logout,changePw}},children)
+}
+
+/* ── Helpers ── */
+const fmtDate=d=>d?new Date(d).toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'}):'—';
+const fmtTime=d=>d?new Date(d).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}):'—';
+const truncate=(s,n=80)=>s&&s.length>n?s.slice(0,n)+'...':s||'—';
+const chBadge=ch=>e('span',{className:ch==='whatsapp'?'badge badge-wa':'badge badge-tg'},ch==='whatsapp'?'WhatsApp':'Telegram');
+const scoreBadge=s=>{if(s==null)return'—';const cls=s>0?'pos':s<0?'neg':'neut';return e('span',{className:'fb-score '+cls},s>0?'+'+s.toFixed(1):s.toFixed(1))};
+
+/* Sub-score mini bars for multi-factor quality breakdown */
+const subScoreBar=(label,val,max1)=>{
+    if(val==null)return null;
+    const pct=Math.max(0,Math.min(100,((val+(max1>1?1:0))/(max1>1?2:1))*100));
+    const clr=val>0.3?'var(--green)':val<-0.1?'var(--red)':'var(--yellow)';
+    return e('div',{style:{display:'flex',alignItems:'center',gap:6,fontSize:11,marginBottom:3}},
+        e('span',{style:{width:80,color:'var(--tx3)',flexShrink:0}},label),
+        e('div',{style:{flex:1,height:6,background:'var(--bg)',borderRadius:3,overflow:'hidden',maxWidth:120}},
+            e('div',{style:{width:pct+'%',height:'100%',background:clr,borderRadius:3,transition:'width 0.3s'}})),
+        e('span',{style:{width:36,textAlign:'right',color:'var(--tx2)',fontWeight:600}},val.toFixed(2))
+    )
+};
+const qualityBreakdown=item=>{
+    if(!item.quality_completeness_score&&item.quality_completeness_score!==0)return null;
+    return e('div',{style:{marginTop:8,padding:'8px 10px',background:'var(--bg)',borderRadius:6,border:'1px solid var(--border)'}},
+        e('div',{style:{fontSize:10,fontWeight:700,color:'var(--tx3)',textTransform:'uppercase',letterSpacing:'0.5px',marginBottom:6}},'Score Breakdown'),
+        subScoreBar('Completeness',item.quality_completeness_score,1),
+        subScoreBar('Sentiment',item.quality_sentiment_score,2),
+        subScoreBar('Tools',item.quality_tool_score,1),
+    )
+};
+
+/* ── Login ── */
+function LoginPage(){
+    const nav=useNavigate();const{login}=React.useContext(Ctx);
+    const[u,setU]=useState('');const[p,setP]=useState('');const[err,setErr]=useState('');const[busy,setBusy]=useState(false);
+    const go=async ev=>{ev.preventDefault();setErr('');setBusy(true);try{await login(u,p);nav('/')}catch(e){setErr('Invalid credentials')}finally{setBusy(false)}};
+    return e('div',{className:'login-wrap'},e('div',{className:'login-box'},
+        e('h1',null,'Analytics'),e('p',null,'Sign in to your admin dashboard'),
+        err&&e('div',{className:'alert alert-err'},err),
+        e('form',{onSubmit:go},
+            e('div',{className:'fg'},e('label',null,'Username'),e('input',{type:'text',value:u,onChange:v=>setU(v.target.value),autoFocus:true})),
+            e('div',{className:'fg'},e('label',null,'Password'),e('input',{type:'password',value:p,onChange:v=>setP(v.target.value)})),
+            e('button',{type:'submit',className:'btn btn-primary',disabled:busy},busy?'Signing in...':'Sign In')
+        )
+    ))
+}
+
+/* ── Change Password ── */
+function ChangePwPage(){
+    const nav=useNavigate();const{changePw}=React.useContext(Ctx);
+    const[cur,setCur]=useState('');const[nw,setNw]=useState('');const[cf,setCf]=useState('');
+    const[err,setErr]=useState('');const[ok,setOk]=useState('');const[busy,setBusy]=useState(false);
+    const go=async ev=>{ev.preventDefault();setErr('');if(nw!==cf){setErr('Passwords do not match');return}
+        setBusy(true);try{await changePw(cur,nw);setOk('Password changed!');setTimeout(()=>nav('/'),1000)}catch(e){setErr(e.message||'Failed')}finally{setBusy(false)}};
+    return e('div',{className:'login-wrap'},e('div',{className:'login-box'},
+        e('h1',null,'Change Password'),e('p',null,'You must change your default password'),
+        err&&e('div',{className:'alert alert-err'},err),ok&&e('div',{className:'alert alert-ok'},ok),
+        e('form',{onSubmit:go},
+            e('div',{className:'fg'},e('label',null,'Current Password'),e('input',{type:'password',value:cur,onChange:v=>setCur(v.target.value),autoFocus:true})),
+            e('div',{className:'fg'},e('label',null,'New Password (min 8 chars)'),e('input',{type:'password',value:nw,onChange:v=>setNw(v.target.value)})),
+            e('div',{className:'fg'},e('label',null,'Confirm New Password'),e('input',{type:'password',value:cf,onChange:v=>setCf(v.target.value)})),
+            e('button',{type:'submit',className:'btn btn-primary',disabled:busy},busy?'Saving...':'Change Password')
+        )
+    ))
+}
+
+/* ── Sidebar ── */
+function Sidebar(){
+    const loc=useLocation();const{logout}=React.useContext(Ctx);const nav=useNavigate();
+    const items=[{p:'/',l:'Dashboard',i:'home'},{p:'/users',l:'Users',i:'users'},{p:'/sessions',l:'Sessions',i:'sess'},{p:'/conversations',l:'Messages',i:'chat'},{p:'/analytics',l:'Analytics',i:'chart'},{p:'/monitoring',l:'Monitoring',i:'pulse'}];
+    const icons={home:'\u2302',users:'\u263A',sess:'\u2630',chat:'\u2709',chart:'\u2197',pulse:'\u2665'};
+    return e('div',{className:'side'},
+        e('div',{className:'side-logo'},e('span',null,'\u26A1'),'Analytics'),
+        e('div',{className:'side-nav'},
+            e('div',{className:'side-label'},'Navigation'),
+            items.map(it=>e('a',{key:it.p,href:'#'+it.p,className:'side-link'+(loc.pathname===it.p?' on':'')},
+                e('span',{className:'ico'},icons[it.i]),it.l))
+        ),
+        e('div',{className:'side-bottom'},e('button',{onClick:async()=>{await logout();nav('/login')}},'\u2190 Sign Out'))
+    )
+}
+
+/* ── Pagination ── */
+function Pag({page,total,limit,onChange}){
+    const pages=Math.max(1,Math.ceil(total/limit));
+    return e('div',{className:'pag'},
+        e('button',{disabled:page<=1,onClick:()=>onChange(page-1)},'\u2039 Prev'),
+        e('span',null,`Page ${page} of ${pages} (${total} total)`),
+        e('button',{disabled:page>=pages,onClick:()=>onChange(page+1)},'Next \u203A')
+    )
+}
+
+/* ══════════════════════════════════════════════════════════════
+   DASHBOARD PAGE — overview + recent conversations + feedback
+   ══════════════════════════════════════════════════════════════ */
+function DashboardPage(){
+    const[stats,setStats]=useState(null);const[convs,setConvs]=useState(null);const[fb,setFb]=useState(null);
+    const[ld,setLd]=useState(true);const[err,setErr]=useState('');
+    const chartRef=useRef(null);const chartInst=useRef(null);
+
+    useEffect(()=>{(async()=>{try{
+        const[s,c,f]=await Promise.all([api.mon.stats(),api.conv.list(1,8),api.analytics.feedback(30)]);
+        setStats(s);setConvs(c);setFb(f);
+    }catch(e){setErr(e.message)}finally{setLd(false)}})()},[]);
+
+    useEffect(()=>{
+        if(!fb||!chartRef.current)return;
+        if(chartInst.current)chartInst.current.destroy();
+        const trend=fb.daily_trend||[];
+        chartInst.current=new Chart(chartRef.current.getContext('2d'),{
+            type:'line',
+            data:{labels:trend.map(d=>d.date),datasets:[
+                {label:'Avg Score',data:trend.map(d=>d.avg_score),borderColor:'#6366f1',backgroundColor:'rgba(99,102,241,.1)',fill:true,tension:.4,pointRadius:3,pointBackgroundColor:'#818cf8',borderWidth:2},
+                {label:'Count',data:trend.map(d=>d.count),borderColor:'#06b6d4',backgroundColor:'transparent',borderDash:[5,5],tension:.4,pointRadius:2,borderWidth:1.5,yAxisID:'y1'}
+            ]},
+            options:{responsive:true,maintainAspectRatio:false,interaction:{intersect:false,mode:'index'},
+                plugins:{legend:{labels:{color:'#8b97b8',font:{size:11}}}},
+                scales:{y:{grid:{color:'#1e2a42'},ticks:{color:'#5c6a8a'},title:{display:true,text:'Score',color:'#5c6a8a'}},
+                    y1:{position:'right',grid:{drawOnChartArea:false},ticks:{color:'#5c6a8a'},title:{display:true,text:'Count',color:'#5c6a8a'}},
+                    x:{grid:{color:'#1e2a42'},ticks:{color:'#5c6a8a',maxRotation:45}}}}
+        });
+        return()=>{if(chartInst.current)chartInst.current.destroy()};
+    },[fb]);
+
+    if(ld)return e('div',{className:'loading'},e('div',{className:'spin'}));
+
+    return e('div',{className:'page'},
+        err&&e('div',{className:'alert alert-err'},err),
+
+        /* Stats cards */
+        stats&&e('div',{className:'stats'},
+            e('div',{className:'stat'},e('div',{className:'stat-label'},'Total Users'),e('div',{className:'stat-val'},stats.total_users),e('div',{className:'stat-sub'},stats.active_users_24h+' active last 24h')),
+            e('div',{className:'stat cyan'},e('div',{className:'stat-label'},'Conversations'),e('div',{className:'stat-val'},stats.total_conversations),e('div',{className:'stat-sub'},stats.total_sessions+' sessions')),
+            e('div',{className:'stat green'},e('div',{className:'stat-label'},'Avg Quality'),e('div',{className:'stat-val'},(stats.avg_quality_score||0).toFixed(2)),e('div',{className:'stat-sub'},'from '+stats.total_feedback+' feedback')),
+            e('div',{className:'stat'+(stats.unresolved_errors>0?' red':'')},e('div',{className:'stat-label'},'Errors'),e('div',{className:'stat-val'},stats.total_errors),e('div',{className:'stat-sub'},stats.unresolved_errors+' unresolved')),
+        ),
+
+        /* Two-column: chart + recent feedback */
+        e('div',{className:'grid2'},
+            e('div',{className:'card'},e('div',{className:'card-head'},e('h3',null,'Feedback Trend (30 days)')),e('div',{className:'chart-wrap'},e('canvas',{ref:chartRef}))),
+            e('div',{className:'card'},e('div',{className:'card-head'},e('h3',null,'Recent Feedback'),fb&&e('span',{className:'count'},fb.total_feedback+' total')),
+                e('div',{className:'card-body',style:{maxHeight:280,overflowY:'auto'}},
+                    fb&&fb.distribution?Object.entries(fb.distribution).map(([type,count])=>
+                        e('div',{key:type,className:'fb-item'},
+                            e('div',{className:'fb-icon '+(type.includes('positive')||type.includes('refinement')?'pos':type.includes('negative')||type.includes('correction')?'neg':'neut')},
+                                type.includes('positive')?'\u2191':type.includes('negative')?'\u2193':'\u2194'),
+                            e('div',{className:'fb-body'},e('div',{className:'fb-type'},type.replace(/_/g,' ')),e('div',{className:'fb-meta'},count+' occurrences')),
+                        )
+                    ):e('div',{className:'empty'},e('div',{className:'ico'},'\u2709'),e('h4',null,'No feedback yet'))
+                )
+            )
+        ),
+
+        /* Recent conversations with actual messages */
+        e('div',{className:'card',style:{marginTop:20}},
+            e('div',{className:'card-head'},e('h3',null,'Recent Conversations'),convs&&e('span',{className:'count'},convs.total+' total')),
+            convs&&convs.conversations.length>0?
+                e('table',{className:'tbl'},
+                    e('thead',null,e('tr',null,
+                        e('th',null,'User'),e('th',null,'Question'),e('th',null,'Response Preview'),e('th',null,'Channel'),e('th',null,'Quality'),e('th',null,'Time')
+                    )),
+                    e('tbody',null,convs.conversations.map(c=>
+                        e('tr',{key:c.id,onClick:()=>window.location.hash='/conversations'},
+                            e('td',null,e('span',{style:{fontWeight:600}},c.user_display_name||'User #'+c.user_id)),
+                            e('td',null,e('div',{className:'msg-preview',style:{maxWidth:220}},truncate(c.message,60))),
+                            e('td',null,e('div',{className:'msg-preview',style:{maxWidth:280}},truncate(c.response,80))),
+                            e('td',null,chBadge(c.channel_type)),
+                            e('td',null,scoreBadge(c.response_quality_score)),
+                            e('td',{style:{whiteSpace:'nowrap',fontSize:12,color:'var(--tx2)'}},fmtTime(c.created_at)),
+                        )
+                    ))
+                )
+            :e('div',{className:'empty'},e('div',{className:'ico'},'\u2709'),e('h4',null,'No conversations yet'),e('p',null,'Start chatting with the bot!'))
+        ),
+    )
+}
+
+/* ══════════════════════════════════════════════════════════════
+   USERS PAGE
+   ══════════════════════════════════════════════════════════════ */
+function UsersPage(){
+    const[data,setData]=useState(null);const[ld,setLd]=useState(true);const[err,setErr]=useState('');
+    const[page,setPage]=useState(1);const[sortBy,setSortBy]=useState('last_active');const[order,setOrder]=useState('desc');
+    const[sel,setSel]=useState(null);
+    const load=async()=>{try{setLd(true);setErr('');setData(await api.users.list(page,20,sortBy,order))}catch(e){setErr(e.message)}finally{setLd(false)}};
+    useEffect(()=>{load()},[page,sortBy,order]);
+    const doSort=col=>{if(sortBy===col)setOrder(order==='asc'?'desc':'asc');else{setSortBy(col);setOrder('desc')}setPage(1)};
+    const arrow=col=>sortBy===col?(order==='asc'?' \u2191':' \u2193'):'';
+    const openUser=async id=>{try{setSel(await api.users.get(id))}catch(e){setErr(e.message)}};
+
+    if(ld&&!data)return e('div',{className:'loading'},e('div',{className:'spin'}));
+    return e('div',{className:'page'},
+        err&&e('div',{className:'alert alert-err'},err),
+        e('div',{className:'card'},
+            e('div',{className:'card-head'},e('h3',null,'All Users'),data&&e('span',{className:'count'},data.total+' users')),
+            data&&e('table',{className:'tbl'},
+                e('thead',null,e('tr',null,
+                    e('th',null,'ID'),
+                    e('th',{className:'sort',onClick:()=>doSort('display_name')},'Name'+arrow('display_name')),
+                    e('th',null,'Telegram'),e('th',null,'WhatsApp'),
+                    e('th',{className:'sort',onClick:()=>doSort('interaction_count')},'Interactions'+arrow('interaction_count')),
+                    e('th',null,'Verified'),
+                    e('th',{className:'sort',onClick:()=>doSort('last_active')},'Last Active'+arrow('last_active')),
+                )),
+                e('tbody',null,data.users.map(u=>
+                    e('tr',{key:u.id,onClick:()=>openUser(u.id)},
+                        e('td',null,'#'+u.id),
+                        e('td',null,e('span',{style:{fontWeight:600}},u.display_name||u.first_name||'—')),
+                        e('td',null,u.telegram_username?'@'+u.telegram_username:'—'),
+                        e('td',null,u.whatsapp_phone||'—'),
+                        e('td',null,e('span',{style:{fontWeight:600}},u.interaction_count)),
+                        e('td',null,u.is_verified?e('span',{className:'badge badge-ok'},'\u2713 Yes'):e('span',{className:'badge badge-warn'},'No')),
+                        e('td',{style:{fontSize:12,color:'var(--tx2)'}},fmtDate(u.last_active)),
+                    )
+                ))
+            ),
+            data&&e(Pag,{page,total:data.total,limit:20,onChange:setPage})
+        ),
+
+        /* User detail modal */
+        sel&&e('div',{className:'overlay',onClick:ev=>{if(ev.target===ev.currentTarget)setSel(null)}},
+            e('div',{className:'modal'},
+                e('div',{className:'modal-head'},e('h3',null,sel.display_name||'User #'+sel.id),e('button',{onClick:()=>setSel(null)},'\u2715')),
+                e('div',{className:'modal-body'},
+                    e('div',{className:'grid3'},
+                        e('div',{className:'df'},e('div',{className:'df-label'},'ID'),e('div',{className:'df-val'},'#'+sel.id)),
+                        e('div',{className:'df'},e('div',{className:'df-label'},'Name'),e('div',{className:'df-val'},sel.first_name||'—')),
+                        e('div',{className:'df'},e('div',{className:'df-label'},'Verified'),e('div',{className:'df-val'},sel.is_verified?'Yes':'No')),
+                    ),
+                    e('div',{className:'grid3',style:{marginTop:12}},
+                        sel.telegram_username&&e('div',{className:'df'},e('div',{className:'df-label'},'Telegram'),e('div',{className:'df-val'},'@'+sel.telegram_username)),
+                        sel.whatsapp_phone&&e('div',{className:'df'},e('div',{className:'df-label'},'WhatsApp'),e('div',{className:'df-val'},sel.whatsapp_phone)),
+                        e('div',{className:'df'},e('div',{className:'df-label'},'Channels'),e('div',{className:'df-val'},(sel.channels||[]).join(', ')||'—')),
+                    ),
+                    e('div',{style:{marginTop:18,padding:14,background:'var(--bg3)',borderRadius:8}},
+                        e('div',{className:'grid3'},
+                            e('div',null,e('div',{style:{fontSize:24,fontWeight:700,color:'var(--ac2)'}},sel.conversation_count),e('div',{style:{fontSize:11,color:'var(--tx3)'}},'\xa0Conversations')),
+                            e('div',null,e('div',{style:{fontSize:24,fontWeight:700,color:'var(--green)'}},sel.feedback_count),e('div',{style:{fontSize:11,color:'var(--tx3)'}},'\xa0Feedback')),
+                            e('div',null,e('div',{style:{fontSize:24,fontWeight:700,color:'var(--yellow)'}},sel.avg_quality_score!=null?sel.avg_quality_score.toFixed(2):'N/A'),e('div',{style:{fontSize:11,color:'var(--tx3)'}},'\xa0Avg Quality')),
+                        )
+                    ),
+                    e('div',{className:'grid2',style:{marginTop:14}},
+                        e('div',{className:'df'},e('div',{className:'df-label'},'Joined'),e('div',{className:'df-val'},fmtTime(sel.created_at))),
+                        e('div',{className:'df'},e('div',{className:'df-label'},'Last Active'),e('div',{className:'df-val'},fmtTime(sel.last_active))),
+                    ),
+                )
+            )
+        )
+    )
+}
+
+/* ══════════════════════════════════════════════════════════════
+   CONVERSATIONS PAGE — with full chat detail
+   ══════════════════════════════════════════════════════════════ */
+function ConversationsPage(){
+    const[data,setData]=useState(null);const[ld,setLd]=useState(true);const[err,setErr]=useState('');
+    const[page,setPage]=useState(1);const[filters,setFilters]=useState({});const[sel,setSel]=useState(null);
+    const load=async()=>{try{setLd(true);setErr('');setData(await api.conv.list(page,30,filters))}catch(e){setErr(e.message)}finally{setLd(false)}};
+    useEffect(()=>{load()},[page,filters]);
+    const setF=(k,v)=>{setFilters({...filters,[k]:v});setPage(1)};
+    const openConv=async id=>{try{setSel(await api.conv.get(id))}catch(e){setErr(e.message)}};
+
+    if(ld&&!data)return e('div',{className:'loading'},e('div',{className:'spin'}));
+    return e('div',{className:'page'},
+        err&&e('div',{className:'alert alert-err'},err),
+
+        /* Filters */
+        e('div',{className:'filters'},
+            e('div',{className:'flt'},e('label',null,'Channel'),e('select',{value:filters.channel||'',onChange:v=>setF('channel',v.target.value)},e('option',{value:''},'All'),e('option',{value:'telegram'},'Telegram'),e('option',{value:'whatsapp'},'WhatsApp'))),
+            e('div',{className:'flt'},e('label',null,'Query Type'),e('input',{type:'text',placeholder:'e.g. sales',value:filters.query_type||'',onChange:v=>setF('query_type',v.target.value)})),
+            e('div',{className:'flt'},e('label',null,'From'),e('input',{type:'date',value:filters.date_from||'',onChange:v=>setF('date_from',v.target.value)})),
+            e('div',{className:'flt'},e('label',null,'To'),e('input',{type:'date',value:filters.date_to||'',onChange:v=>setF('date_to',v.target.value)})),
+            e('button',{className:'btn btn-ghost btn-sm',onClick:()=>{setFilters({});setPage(1)}},'\u21BA Clear'),
+        ),
+
+        /* Table */
+        e('div',{className:'card'},
+            e('div',{className:'card-head'},e('h3',null,'Conversations'),data&&e('span',{className:'count'},data.total+' results')),
+            data&&data.conversations.length>0?e('div',null,
+                e('table',{className:'tbl'},
+                    e('thead',null,e('tr',null,
+                        e('th',null,'User'),e('th',null,'Question'),e('th',null,'Bot Response'),
+                        e('th',null,'Type'),e('th',null,'Channel'),e('th',null,'Score'),e('th',null,'Feedback'),e('th',null,'Date')
+                    )),
+                    e('tbody',null,data.conversations.map(c=>
+                        e('tr',{key:c.id,onClick:()=>openConv(c.id)},
+                            e('td',null,e('span',{style:{fontWeight:600,fontSize:12}},c.user_display_name||'#'+c.user_id)),
+                            e('td',null,e('div',{className:'msg-preview',style:{maxWidth:200}},truncate(c.message,55))),
+                            e('td',null,e('div',{className:'msg-preview',style:{maxWidth:260}},truncate(c.response,70))),
+                            e('td',null,e('span',{className:'badge badge-q'},c.query_type)),
+                            e('td',null,chBadge(c.channel_type)),
+                            e('td',null,scoreBadge(c.response_quality_score)),
+                            e('td',null,c.feedback_count>0?e('span',{className:'badge badge-info'},c.feedback_count):e('span',{style:{color:'var(--tx3)'}},'—')),
+                            e('td',{style:{whiteSpace:'nowrap',fontSize:12,color:'var(--tx2)'}},fmtTime(c.created_at)),
+                        )
+                    )),
+                ),
+                e(Pag,{page,total:data.total,limit:30,onChange:setPage})
+            ):e('div',{className:'empty'},e('div',{className:'ico'},'\u2709'),e('h4',null,'No conversations found'))
+        ),
+
+        /* Conversation detail modal — full chat view */
+        sel&&e('div',{className:'overlay',onClick:ev=>{if(ev.target===ev.currentTarget)setSel(null)}},
+            e('div',{className:'modal'},
+                e('div',{className:'modal-head'},
+                    e('h3',null,'Conversation #'+sel.id),
+                    e('button',{onClick:()=>setSel(null)},'\u2715')
+                ),
+                e('div',{className:'modal-body'},
+                    /* Meta info */
+                    e('div',{className:'grid3',style:{marginBottom:16}},
+                        e('div',{className:'df'},e('div',{className:'df-label'},'Channel'),e('div',{className:'df-val'},chBadge(sel.channel_type))),
+                        e('div',{className:'df'},e('div',{className:'df-label'},'Query Type'),e('div',{className:'df-val'},e('span',{className:'badge badge-q'},sel.query_type))),
+                        e('div',{className:'df'},e('div',{className:'df-label'},'Time'),e('div',{className:'df-val',style:{fontSize:12}},fmtTime(sel.created_at))),
+                    ),
+
+                    /* Chat bubbles */
+                    e('div',{style:{marginBottom:16}},
+                        e('div',{className:'chat-bubble chat-user'},
+                            e('span',{className:'chat-label user'},'User Question'),
+                            sel.message
+                        ),
+                        e('div',{className:'chat-bubble chat-bot'},
+                            e('span',{className:'chat-label bot'},'Bot Response'),
+                            sel.response
+                        ),
+                    ),
+
+                    /* Tool calls */
+                    sel.tool_calls_json&&e('div',{style:{marginBottom:16}},
+                        e('div',{className:'df-label'},'Tool Calls'),
+                        e('pre',{style:{background:'var(--bg)',padding:12,borderRadius:6,fontSize:11,color:'var(--cyan)',overflowX:'auto',border:'1px solid var(--border)'}},
+                            typeof sel.tool_calls_json==='string'?sel.tool_calls_json:JSON.stringify(sel.tool_calls_json,null,2))
+                    ),
+
+                    /* Quality score + multi-factor breakdown */
+                    sel.response_quality_score!=null&&e('div',{style:{marginBottom:16}},
+                        e('div',{className:'df'},e('div',{className:'df-label'},'Quality Score'),e('div',{className:'df-val'},scoreBadge(sel.response_quality_score))),
+                        qualityBreakdown(sel)),
+
+                    /* Feedback list */
+                    sel.feedback&&sel.feedback.length>0&&e('div',null,
+                        e('div',{className:'df-label',style:{marginBottom:8}},'Feedback ('+sel.feedback.length+')'),
+                        sel.feedback.map((fb,i)=>e('div',{key:i,className:'fb-item'},
+                            e('div',{className:'fb-icon '+(fb.quality_score>0?'pos':fb.quality_score<0?'neg':'neut')},
+                                fb.quality_score>0?'\u2191':fb.quality_score<0?'\u2193':'\u2194'),
+                            e('div',{className:'fb-body'},
+                                e('div',{className:'fb-type'},fb.feedback_type.replace(/_/g,' ')),
+                                fb.signal_text&&e('div',{className:'fb-text'},'"'+fb.signal_text+'"'),
+                                e('div',{className:'fb-meta'},(fb.tool_used?'Tool: '+fb.tool_used+' \u2022 ':'')+'Score: '+fb.quality_score+(fb.created_at?' \u2022 '+fmtTime(fb.created_at):''))
+                            ),
+                            e('div',null,scoreBadge(fb.quality_score))
+                        ))
+                    ),
+                    (!sel.feedback||sel.feedback.length===0)&&e('div',{style:{color:'var(--tx3)',fontSize:12,fontStyle:'italic'}},'No feedback for this conversation'),
+                )
+            )
+        )
+    )
+}
+
+/* ══════════════════════════════════════════════════════════════
+   SESSIONS PAGE — session-grouped chat threads
+   ══════════════════════════════════════════════════════════════ */
+function SessionsPage(){
+    const[data,setData]=useState(null);const[ld,setLd]=useState(true);const[err,setErr]=useState('');
+    const[page,setPage]=useState(1);const[filters,setFilters]=useState({});
+    const[sel,setSel]=useState(null);const[selLd,setSelLd]=useState(false);
+    const load=async()=>{try{setLd(true);setErr('');setData(await api.sessions.list(page,20,filters))}catch(e){setErr(e.message)}finally{setLd(false)}};
+    useEffect(()=>{load()},[page,filters]);
+    const setF=(k,v)=>{setFilters({...filters,[k]:v});setPage(1)};
+    const openSession=async id=>{try{setSelLd(true);setSel(await api.sessions.get(id))}catch(e){setErr(e.message)}finally{setSelLd(false)}};
+
+    if(ld&&!data)return e('div',{className:'loading'},e('div',{className:'spin'}));
+    return e('div',{className:'page'},
+        err&&e('div',{className:'alert alert-err'},err),
+
+        /* Filters */
+        e('div',{className:'filters'},
+            e('div',{className:'flt'},e('label',null,'Channel'),e('select',{value:filters.channel||'',onChange:v=>setF('channel',v.target.value)},e('option',{value:''},'All'),e('option',{value:'telegram'},'Telegram'),e('option',{value:'whatsapp'},'WhatsApp'))),
+            e('button',{className:'btn btn-ghost btn-sm',onClick:()=>{setFilters({});setPage(1)}},'\u21BA Clear'),
+        ),
+
+        /* Sessions list */
+        !sel?e('div',null,
+            e('div',{className:'card'},
+                e('div',{className:'card-head'},e('h3',null,'Chat Sessions'),data&&e('span',{className:'count'},data.total+' sessions')),
+                data&&data.sessions.length>0?e('table',{className:'tbl'},
+                    e('thead',null,e('tr',null,
+                        e('th',null,'#'),e('th',null,'User'),e('th',null,'Intent'),e('th',null,'Messages'),e('th',null,'Channel'),e('th',null,'First Message'),e('th',null,'Started'),e('th',null,'Duration')
+                    )),
+                    e('tbody',null,data.sessions.map(s=>
+                        e('tr',{key:s.id,onClick:()=>openSession(s.id)},
+                            e('td',null,s.id),
+                            e('td',null,e('span',{style:{fontWeight:600}},s.user_display_name||'#'+s.user_id)),
+                            e('td',null,s.primary_intent?e('span',{className:'badge badge-q'},s.primary_intent):'—'),
+                            e('td',null,e('span',{style:{fontWeight:700,color:'var(--ac2)'}},s.message_count)),
+                            e('td',null,chBadge(s.channel_type)),
+                            e('td',null,e('div',{className:'msg-preview',style:{maxWidth:250}},truncate(s.first_message_preview,65))),
+                            e('td',{style:{whiteSpace:'nowrap',fontSize:12,color:'var(--tx2)'}},fmtTime(s.started_at)),
+                            e('td',{style:{fontSize:12,color:'var(--tx2)'}},s.started_at&&s.last_message_at?
+                                (()=>{const mins=Math.round((new Date(s.last_message_at)-new Date(s.started_at))/60000);return mins<60?mins+'m':Math.round(mins/60)+'h '+mins%60+'m'})():'—'),
+                        )
+                    ))
+                ):e('div',{className:'empty'},e('div',{className:'ico'},'\u2630'),e('h4',null,'No sessions yet')),
+                data&&e(Pag,{page,total:data.total,limit:20,onChange:setPage})
+            )
+        )
+
+        /* Session detail — full chat thread */
+        :e('div',null,
+            e('button',{className:'btn btn-ghost btn-sm',onClick:()=>setSel(null),style:{marginBottom:16}},'\u2190 Back to Sessions'),
+            selLd?e('div',{className:'loading'},e('div',{className:'spin'})):
+            sel&&e('div',null,
+                /* Session header */
+                e('div',{className:'card'},
+                    e('div',{className:'card-head'},
+                        e('h3',null,'Session #'+sel.id+' — '+(sel.user_display_name||'User #'+sel.user_id)),
+                        e('div',{style:{display:'flex',gap:8,alignItems:'center'}},
+                            chBadge(sel.channel_type),
+                            sel.primary_intent&&e('span',{className:'badge badge-q'},sel.primary_intent),
+                            e('span',{style:{fontSize:12,color:'var(--tx2)'}},sel.message_count+' messages'),
+                        )
+                    ),
+                    e('div',{className:'card-body'},
+                        e('div',{className:'grid3'},
+                            e('div',{className:'df'},e('div',{className:'df-label'},'Started'),e('div',{className:'df-val'},fmtTime(sel.started_at))),
+                            e('div',{className:'df'},e('div',{className:'df-label'},'Last Message'),e('div',{className:'df-val'},fmtTime(sel.last_message_at))),
+                            e('div',{className:'df'},e('div',{className:'df-label'},'Ended'),e('div',{className:'df-val'},sel.ended_at?fmtTime(sel.ended_at):e('span',{className:'badge badge-ok'},'Active'))),
+                        ),
+                        sel.session_summary&&e('div',{style:{marginTop:12}},
+                            e('div',{className:'df-label'},'Session Summary'),
+                            e('div',{className:'df-val',style:{fontStyle:'italic',color:'var(--tx2)'}},sel.session_summary)
+                        )
+                    )
+                ),
+
+                /* Chat thread */
+                e('div',{className:'card',style:{marginTop:16}},
+                    e('div',{className:'card-head'},e('h3',null,'Conversation Thread')),
+                    e('div',{className:'card-body'},
+                        sel.conversations&&sel.conversations.length>0?
+                        sel.conversations.map((conv,idx)=>
+                            e('div',{key:conv.id,style:{marginBottom:24,paddingBottom:24,borderBottom:idx<sel.conversations.length-1?'1px dashed var(--border2)':'none'}},
+                                /* Message number + time */
+                                e('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}},
+                                    e('span',{style:{fontSize:11,fontWeight:700,color:'var(--tx3)',textTransform:'uppercase',letterSpacing:'1px'}},'Message '+(idx+1)+' of '+sel.conversations.length),
+                                    e('div',{style:{display:'flex',gap:8,alignItems:'center'}},
+                                        conv.query_type&&e('span',{className:'badge badge-q'},conv.query_type),
+                                        e('span',{style:{fontSize:11,color:'var(--tx3)'}},fmtTime(conv.created_at)),
+                                    )
+                                ),
+                                /* User question bubble */
+                                e('div',{className:'chat-bubble chat-user'},
+                                    e('span',{className:'chat-label user'},'\u2022 User'),
+                                    conv.message
+                                ),
+                                /* Bot response bubble */
+                                e('div',{className:'chat-bubble chat-bot'},
+                                    e('span',{className:'chat-label bot'},'\u2022 Bot'),
+                                    conv.response
+                                ),
+                                /* Tool calls if any */
+                                conv.tool_calls_json&&e('details',{style:{marginTop:8}},
+                                    e('summary',{style:{fontSize:11,color:'var(--cyan)',cursor:'pointer',fontWeight:600}},'Tool Calls'),
+                                    e('pre',{style:{background:'var(--bg)',padding:10,borderRadius:6,fontSize:11,color:'var(--cyan)',overflowX:'auto',border:'1px solid var(--border)',marginTop:6}},
+                                        typeof conv.tool_calls_json==='string'?conv.tool_calls_json:JSON.stringify(conv.tool_calls_json,null,2))
+                                ),
+                                /* Quality + feedback + sub-score breakdown */
+                                (conv.response_quality_score!=null||conv.feedback.length>0)&&e('div',{style:{marginTop:10}},
+                                    e('div',{style:{display:'flex',gap:12,alignItems:'center',flexWrap:'wrap'}},
+                                        conv.response_quality_score!=null&&e('div',{style:{fontSize:12}},e('span',{style:{color:'var(--tx3)'}},'Quality: '),scoreBadge(conv.response_quality_score)),
+                                        conv.feedback.map((fb,fi)=>e('div',{key:fi,style:{fontSize:11,display:'flex',alignItems:'center',gap:4}},
+                                            e('span',{className:'fb-score '+(fb.quality_score>0?'pos':fb.quality_score<0?'neg':'neut')},fb.feedback_type.replace(/_/g,' ')),
+                                            fb.signal_text&&e('span',{style:{color:'var(--tx3)',fontStyle:'italic'}},'"'+truncate(fb.signal_text,30)+'"'),
+                                        ))
+                                    ),
+                                    qualityBreakdown(conv),
+                                ),
+                            )
+                        )
+                        :e('div',{className:'empty'},e('h4',null,'No messages in this session'))
+                    )
+                ),
+            )
+        )
+    )
+}
+
+/* ══════════════════════════════════════════════════════════════
+   ANALYTICS PAGE — charts + tables with actual data
+   ══════════════════════════════════════════════════════════════ */
+function AnalyticsPage(){
+    const[fb,setFb]=useState(null);const[ch,setCh]=useState(null);const[tools,setTools]=useState(null);const[errs,setErrs]=useState(null);
+    const[ld,setLd]=useState(true);const[err,setErr]=useState('');
+    const fbChartRef=useRef(null);const chChartRef=useRef(null);const toolChartRef=useRef(null);
+    const fbInst=useRef(null);const chInst=useRef(null);const toolInst=useRef(null);
+
+    useEffect(()=>{(async()=>{try{
+        const[f,c,t,er]=await Promise.all([api.analytics.feedback(30),api.analytics.channels(30),api.analytics.tools(30),api.analytics.errors(30)]);
+        setFb(f);setCh(c);setTools(t);setErrs(er);
+    }catch(e){setErr(e.message)}finally{setLd(false)}})()},[]);
+
+    /* Feedback pie */
+    useEffect(()=>{if(!fb||!fbChartRef.current)return;if(fbInst.current)fbInst.current.destroy();
+        const d=fb.distribution||{};
+        fbInst.current=new Chart(fbChartRef.current.getContext('2d'),{type:'doughnut',
+            data:{labels:Object.keys(d).map(k=>k.replace(/_/g,' ')),datasets:[{data:Object.values(d),backgroundColor:['#10b981','#6366f1','#f43f5e','#f59e0b','#06b6d4','#a78bfa'],borderColor:'#111827',borderWidth:2}]},
+            options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'right',labels:{color:'#8b97b8',font:{size:11},padding:12}}}}
+        });return()=>{if(fbInst.current)fbInst.current.destroy()};
+    },[fb]);
+
+    /* Channel bar */
+    useEffect(()=>{if(!ch||!chChartRef.current)return;if(chInst.current)chInst.current.destroy();
+        const chs=ch.channels||[];
+        chInst.current=new Chart(chChartRef.current.getContext('2d'),{type:'bar',
+            data:{labels:chs.map(c=>c.channel),datasets:[
+                {label:'Conversations',data:chs.map(c=>c.conversation_count),backgroundColor:'#6366f1',borderRadius:4},
+                {label:'Users',data:chs.map(c=>c.unique_users),backgroundColor:'#06b6d4',borderRadius:4}
+            ]},
+            options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:'#8b97b8'}}},
+                scales:{y:{grid:{color:'#1e2a42'},ticks:{color:'#5c6a8a'}},x:{grid:{color:'#1e2a42'},ticks:{color:'#5c6a8a'}}}}
+        });return()=>{if(chInst.current)chInst.current.destroy()};
+    },[ch]);
+
+    /* Tool usage bar */
+    useEffect(()=>{if(!tools||!tools.length||!toolChartRef.current)return;if(toolInst.current)toolInst.current.destroy();
+        toolInst.current=new Chart(toolChartRef.current.getContext('2d'),{type:'bar',
+            data:{labels:tools.map(t=>t.tool_name),datasets:[
+                {label:'Success',data:tools.map(t=>t.success_count),backgroundColor:'#10b981',borderRadius:4},
+                {label:'Failure',data:tools.map(t=>t.failure_count),backgroundColor:'#f43f5e',borderRadius:4}
+            ]},
+            options:{responsive:true,maintainAspectRatio:false,indexAxis:'y',plugins:{legend:{labels:{color:'#8b97b8'}}},
+                scales:{x:{stacked:true,grid:{color:'#1e2a42'},ticks:{color:'#5c6a8a'}},y:{stacked:true,grid:{color:'#1e2a42'},ticks:{color:'#5c6a8a',font:{size:11}}}}}
+        });return()=>{if(toolInst.current)toolInst.current.destroy()};
+    },[tools]);
+
+    if(ld)return e('div',{className:'loading'},e('div',{className:'spin'}));
+    return e('div',{className:'page'},
+        err&&e('div',{className:'alert alert-err'},err),
+
+        /* Summary stats */
+        fb&&e('div',{className:'stats'},
+            e('div',{className:'stat green'},e('div',{className:'stat-label'},'Positive'),e('div',{className:'stat-val'},fb.positive_count)),
+            e('div',{className:'stat red'},e('div',{className:'stat-label'},'Negative'),e('div',{className:'stat-val'},fb.negative_count)),
+            e('div',{className:'stat'},e('div',{className:'stat-label'},'Total Feedback'),e('div',{className:'stat-val'},fb.total_feedback)),
+            e('div',{className:'stat cyan'},e('div',{className:'stat-label'},'Avg Score'),e('div',{className:'stat-val'},(fb.avg_quality_score||0).toFixed(2))),
+        ),
+
+        /* Charts row */
+        e('div',{className:'grid2'},
+            e('div',{className:'card'},e('div',{className:'card-head'},e('h3',null,'Feedback Distribution')),e('div',{className:'chart-wrap'},e('canvas',{ref:fbChartRef}))),
+            e('div',{className:'card'},e('div',{className:'card-head'},e('h3',null,'Channel Comparison')),e('div',{className:'chart-wrap'},e('canvas',{ref:chChartRef}))),
+        ),
+
+        /* Tool usage chart */
+        tools&&tools.length>0&&e('div',{className:'card'},e('div',{className:'card-head'},e('h3',null,'Tool Usage (Success vs Failure)')),
+            e('div',{className:'chart-wrap',style:{height:Math.max(200,tools.length*35+60)}},e('canvas',{ref:toolChartRef}))),
+
+        /* Tool usage table with details */
+        tools&&tools.length>0&&e('div',{className:'card',style:{marginTop:20}},
+            e('div',{className:'card-head'},e('h3',null,'Tool Performance Details')),
+            e('table',{className:'tbl'},
+                e('thead',null,e('tr',null,e('th',null,'Tool'),e('th',null,'Total'),e('th',null,'Success'),e('th',null,'Failures'),e('th',null,'Rate'),e('th',null,'Avg Time'))),
+                e('tbody',null,tools.map(t=>e('tr',{key:t.tool_name},
+                    e('td',null,e('span',{style:{fontWeight:600}},t.tool_name)),
+                    e('td',null,t.total_calls),
+                    e('td',null,e('span',{style:{color:'var(--green)'}},t.success_count)),
+                    e('td',null,t.failure_count>0?e('span',{style:{color:'var(--red)'}},t.failure_count):'0'),
+                    e('td',null,e('span',{className:t.success_rate>=80?'badge badge-ok':t.success_rate>=50?'badge badge-warn':'badge badge-err'},t.success_rate.toFixed(1)+'%')),
+                    e('td',null,t.avg_execution_time_ms.toFixed(0)+' ms'),
+                )))
+            )
+        ),
+
+        /* Errors table */
+        errs&&errs.errors&&errs.errors.length>0&&e('div',{className:'card',style:{marginTop:20}},
+            e('div',{className:'card-head'},e('h3',null,'Recent Errors'),e('span',{className:'count'},errs.total+' total')),
+            e('table',{className:'tbl'},
+                e('thead',null,e('tr',null,e('th',null,'Tool'),e('th',null,'Error Type'),e('th',null,'Message'),e('th',null,'Status'),e('th',null,'Date'))),
+                e('tbody',null,errs.errors.slice(0,20).map(er=>e('tr',{key:er.id},
+                    e('td',null,e('span',{style:{fontWeight:600}},er.tool_name)),
+                    e('td',null,e('span',{className:'badge badge-err'},er.error_type)),
+                    e('td',null,e('div',{className:'msg-preview',style:{maxWidth:300}},truncate(er.error_message,100))),
+                    e('td',null,er.resolved?e('span',{className:'badge badge-ok'},'Resolved'):e('span',{className:'badge badge-warn'},'Open')),
+                    e('td',{style:{whiteSpace:'nowrap',fontSize:12,color:'var(--tx2)'}},fmtDate(er.created_at)),
+                )))
+            )
+        ),
+    )
+}
+
+/* ══════════════════════════════════════════════════════════════
+   MONITORING PAGE
+   ══════════════════════════════════════════════════════════════ */
+function MonitoringPage(){
+    const[health,setHealth]=useState(null);const[stats,setStats]=useState(null);const[err,setErr]=useState('');
+    const load=async()=>{try{setErr('');const[h,s]=await Promise.all([api.mon.health(),api.mon.stats()]);setHealth(h);setStats(s)}catch(e){setErr(e.message)}};
+    useEffect(()=>{load();const iv=setInterval(load,10000);return()=>clearInterval(iv)},[]);
+    const hBadge=(v)=>{const ok=v==='healthy'||v==='ok'||v===true;return e('span',{className:ok?'badge badge-ok':'badge badge-err'},ok?'\u2713 Healthy':'\u2717 Down')};
+
+    return e('div',{className:'page'},
+        err&&e('div',{className:'alert alert-err'},err),
+        e('div',{style:{fontSize:11,color:'var(--tx3)',marginBottom:16}},'Auto-refreshes every 10 seconds'),
+
+        /* Health status */
+        health&&e('div',{className:'card'},
+            e('div',{className:'card-head'},e('h3',null,'System Health')),
+            e('div',{className:'card-body'},
+                e('div',{className:'grid3'},
+                    e('div',{className:'df'},e('div',{className:'df-label'},'Overall'),e('div',{className:'df-val'},hBadge(health.status))),
+                    e('div',{className:'df'},e('div',{className:'df-label'},'Database'),e('div',{className:'df-val'},hBadge(health.database))),
+                    e('div',{className:'df'},e('div',{className:'df-label'},'Bot'),e('div',{className:'df-val'},hBadge(health.bot_running))),
+                )
+            )
+        ),
+
+        /* Detailed metrics */
+        stats&&e('div',{className:'stats',style:{marginTop:20}},
+            e('div',{className:'stat'},e('div',{className:'stat-label'},'Total Users'),e('div',{className:'stat-val'},stats.total_users)),
+            e('div',{className:'stat cyan'},e('div',{className:'stat-label'},'Active 24h'),e('div',{className:'stat-val'},stats.active_users_24h)),
+            e('div',{className:'stat'},e('div',{className:'stat-label'},'Conversations'),e('div',{className:'stat-val'},stats.total_conversations)),
+            e('div',{className:'stat'},e('div',{className:'stat-label'},'Sessions'),e('div',{className:'stat-val'},stats.total_sessions)),
+            e('div',{className:'stat green'},e('div',{className:'stat-label'},'Avg Quality'),e('div',{className:'stat-val'},(stats.avg_quality_score||0).toFixed(2))),
+            e('div',{className:'stat'},e('div',{className:'stat-label'},'Feedback'),e('div',{className:'stat-val'},stats.total_feedback)),
+            e('div',{className:'stat'+(stats.total_errors>0?' red':'')},e('div',{className:'stat-label'},'Total Errors'),e('div',{className:'stat-val'},stats.total_errors)),
+            e('div',{className:'stat'+(stats.unresolved_errors>0?' red':'')},e('div',{className:'stat-label'},'Unresolved'),e('div',{className:'stat-val'},stats.unresolved_errors)),
+            e('div',{className:'stat'},e('div',{className:'stat-label'},'DB Size'),e('div',{className:'stat-val'},stats.database_size_mb<1?(stats.database_size_mb*1024).toFixed(0)+' KB':stats.database_size_mb.toFixed(1)+' MB')),
+            e('div',{className:'stat'},e('div',{className:'stat-label'},'Cache'),e('div',{className:'stat-val'},stats.cache_entries),e('div',{className:'stat-sub'},'entries')),
+        ),
+    )
+}
+
+/* ══════════════════════════════════════════════════════════════
+   APP SHELL
+   ══════════════════════════════════════════════════════════════ */
+function AppContent(){
+    const{user,ld}=React.useContext(Ctx);const loc=useLocation();const nav=useNavigate();
+    useEffect(()=>{if(!ld&&!user)nav('/login')},[ld,user,nav]);
+    if(ld)return e('div',{className:'loading',style:{marginTop:100}},e('div',{className:'spin'}));
+    if(!user)return e(LoginPage);
+    if(user.must_change_password)return e(ChangePwPage);
+    const titles={'/':{t:'Dashboard',s:'Overview'},'/users':{t:'Users',s:'Manage bot users'},'/sessions':{t:'Sessions',s:'Chat threads'},'/conversations':{t:'Conversations',s:'Chat history'},'/analytics':{t:'Analytics',s:'Performance metrics'},'/monitoring':{t:'Monitoring',s:'System health'}};
+    const cur=titles[loc.pathname]||titles['/'];
+    return e('div',{className:'app'},
+        e(Sidebar),
+        e('div',{className:'main'},
+            e('div',{className:'topbar'},e('div',null,e('h2',null,cur.t),e('div',{style:{fontSize:11,color:'var(--tx3)'}},cur.s)),e('div',{className:'topbar-right'},e('span',{className:'topbar-user'},'\u2022 '+user.username))),
+            e('div',{className:'content'},
+                e(Routes,null,
+                    e(Route,{path:'/',element:e(DashboardPage)}),
+                    e(Route,{path:'/users',element:e(UsersPage)}),
+                    e(Route,{path:'/sessions',element:e(SessionsPage)}),
+                    e(Route,{path:'/conversations',element:e(ConversationsPage)}),
+                    e(Route,{path:'/analytics',element:e(AnalyticsPage)}),
+                    e(Route,{path:'/monitoring',element:e(MonitoringPage)}),
+                )
+            )
+        )
+    )
+}
+function App(){return e(AuthProv,null,e(HashRouter,null,e(Routes,null,e(Route,{path:'/login',element:e(LoginPage)}),e(Route,{path:'*',element:e(AppContent)}))))}
+ReactDOM.createRoot(document.getElementById('root')).render(e(App));
+</script>
+</body>
+</html>

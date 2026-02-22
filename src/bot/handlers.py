@@ -405,6 +405,8 @@ class MessageHandler:
                 previous_query_type=previous_query_type,
                 current_message=current_message,
                 current_query_type=current_query_type,
+                response=latest_conv.response,
+                tool_calls_json=latest_conv.tool_calls_json,
             )
 
             if feedback and feedback.get("quality_score", 0) != 0:
@@ -423,6 +425,13 @@ class MessageHandler:
                     quality_score=feedback["quality_score"],
                 )
 
+                # Persist sub-score breakdown for dashboard analytics
+                if feedback.get("sub_scores"):
+                    self.db_ops.update_conversation_sub_scores(
+                        conversation_id=latest_conv.id,
+                        sub_scores=feedback["sub_scores"],
+                    )
+
                 # Update template quality if a template was used
                 if (
                     self.template_manager
@@ -434,10 +443,11 @@ class MessageHandler:
                     )
 
                 logger.debug(
-                    "Feedback recorded",
+                    "Feedback recorded (multi-factor)",
                     user_id=user_id,
                     feedback_type=feedback["feedback_type"],
                     quality_score=feedback["quality_score"],
+                    sub_scores=feedback.get("sub_scores"),
                 )
 
         except Exception as e:
