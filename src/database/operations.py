@@ -2555,12 +2555,16 @@ class DatabaseOperations:
             if target_channel == "whatsapp" and merge_user.whatsapp_phone:
                 wp = merge_user.whatsapp_phone
                 merge_user.whatsapp_phone = None  # Clear to avoid unique constraint
-                session.flush()                   # Force SQLite to release the lock
+                session.commit()                  # Force SQLite to release the lock
+                session.refresh(keep_user)        # Refresh bound objects
+                session.refresh(merge_user)
                 keep_user.whatsapp_phone = wp
             elif target_channel == "telegram" and merge_user.telegram_user_id:
                 tg = merge_user.telegram_user_id
                 merge_user.telegram_user_id = None
-                session.flush()
+                session.commit()
+                session.refresh(keep_user)
+                session.refresh(merge_user)
                 keep_user.telegram_user_id = tg
 
             # Copy display info if the kept user is missing it
