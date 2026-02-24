@@ -48,7 +48,7 @@ CUSTOMER_SORT_KEYS = [
 # Characters that should NEVER appear in a Shopify filter string.
 # These could indicate injection attempts or malformed input.
 _FILTER_BLOCKLIST_RE = re.compile(
-    r"[{}\[\]<>;`\\]"          # braces, brackets, angle-brackets, semicolons, backticks, backslashes
+    r"[{}\[\];`\\]"          # braces, brackets, semicolons, backticks, backslashes
     r"|--"                      # SQL comment sequences
     r"|/\*"                     # C-style comment open
     r"|\bmutation\b"           # GraphQL mutation keyword
