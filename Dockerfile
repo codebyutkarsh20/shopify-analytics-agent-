@@ -19,7 +19,11 @@ COPY requirements.txt .
 # Install Python dependencies into a virtual env
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
+
+# Install PyTorch CPU-only FIRST (avoids pulling ~3.5GB of NVIDIA CUDA libraries)
+# The server has no GPU — CPU inference is all we need for sentence-transformers
 RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && \
     pip install --no-cache-dir -r requirements.txt
 
 

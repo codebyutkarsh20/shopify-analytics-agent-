@@ -7,6 +7,7 @@
 #   ./deploy.sh              Auto-detect what changed and deploy accordingly
 #   ./deploy.sh --restart    Just restart container (for .env changes on server)
 #   ./deploy.sh --fresh      Full rebuild from scratch (nuclear option)
+#   ./deploy.sh --fresh-db   Rebuild + wipe database & logs (clean slate)
 #   ./deploy.sh --logs       Just show recent logs, no deploy
 #   ./deploy.sh --status     Show container status and disk usage
 #   ./deploy.sh --cleanup    Free disk space (prune all unused Docker data)
@@ -91,9 +92,66 @@ RESTART_SCRIPT
     exit 0
 fi
 
+if [ "$MODE" = "--fresh-db" ]; then
+    warn "This will DELETE the bot database and logs, then rebuild and restart."
+    warn "All learned templates, conversation history, and sessions will be lost."
+    read -p "Continue? (y/N) " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        log "Syncing latest code first..."
+        rsync -avz --progress \
+            --exclude '.git' \
+            --exclude '.env' \
+            --exclude '.env.local' \
+            --exclude '.env.production' \
+            --exclude 'venv/' \
+            --exclude '.venv/' \
+            --exclude '__pycache__' \
+            --exclude '*.pyc' \
+            --exclude 'data/' \
+            --exclude 'logs/' \
+            --exclude '.pytest_cache' \
+            --exclude 'htmlcov/' \
+            --exclude '.coverage' \
+            --exclude '.idea/' \
+            --exclude '.vscode/' \
+            ./ "$REMOTE_HOST:$REMOTE_DIR/"
+
+        log "Stopping container, wiping DB volumes, rebuilding..."
+        ssh "$REMOTE_HOST" bash -s <<'FRESHDB_SCRIPT'
+set -euo pipefail
+cd /home/azureuser/shopify-analytics-agent
+
+echo "[SERVER] Stopping container..."
+docker compose down --remove-orphans 2>/dev/null || true
+
+echo "[SERVER] Removing data and log volumes..."
+docker volume rm shopify-bot-data 2>/dev/null || true
+docker volume rm shopify-bot-logs 2>/dev/null || true
+
+echo "[SERVER] Rebuilding image (fresh, no cache)..."
+docker compose build --no-cache
+
+echo "[SERVER] Starting bot with clean database..."
+docker compose up -d
+
+echo "[SERVER] Waiting 15 seconds for startup + seed templates..."
+sleep 15
+
+echo "[SERVER] Container status:"
+docker compose ps
+
+echo "[SERVER] Recent logs:"
+docker compose logs --tail=30
+FRESHDB_SCRIPT
+        log "Fresh DB deploy complete! Seed templates will regenerate on first startup."
+    fi
+    exit 0
+fi
+
 # ---- Validate mode ----
 if [ "$MODE" != "deploy" ] && [ "$MODE" != "--fresh" ]; then
-    err "Unknown option: $MODE\nUsage: ./deploy.sh [--restart|--fresh|--logs|--status|--cleanup]"
+    err "Unknown option: $MODE\nUsage: ./deploy.sh [--restart|--fresh|--fresh-db|--logs|--status|--cleanup]"
 fi
 
 # ---- Pre-flight checks ----
@@ -117,7 +175,7 @@ if [ "$MODE" = "deploy" ]; then
 
     if echo "$CHANGED_FILES" | grep -q "requirements.txt"; then
         info "Detected requirements.txt change → dependencies will be reinstalled"
-        warn "This deploy will take longer (~15-20 min) to install new packages"
+        warn "This deploy will take longer (~5-10 min) to install new packages"
     fi
 
     if echo "$CHANGED_FILES" | grep -q "Dockerfile\|docker-compose.yml"; then
@@ -190,21 +248,33 @@ if [ ! -f .env ]; then
     exit 1
 fi
 
-# ---- Auto-prune: clean up old/dangling images to prevent disk full ----
-echo "[SERVER] Cleaning up old Docker resources..."
+# ---- Auto-prune: clean up dangling images only (preserves build cache) ----
+echo "[SERVER] Cleaning up dangling Docker resources..."
 docker image prune -f 2>/dev/null || true
+docker builder prune -f --keep-storage=5GB 2>/dev/null || true
 
 # ---- Check disk space before build ----
 AVAILABLE_KB=$(df / | tail -1 | awk '{print $4}')
-if [ "$AVAILABLE_KB" -lt 2000000 ]; then
-    echo "[SERVER] WARNING: Less than 2GB disk space available!"
-    echo "[SERVER] Running aggressive cleanup..."
-    docker system prune -a -f 2>/dev/null || true
+AVAILABLE_GB=$((AVAILABLE_KB / 1048576))
+echo "[SERVER] Available disk space: ${AVAILABLE_GB}GB"
+
+if [ "$AVAILABLE_KB" -lt 5000000 ]; then
+    echo "[SERVER] WARNING: Less than 5GB disk space available!"
+    echo "[SERVER] Pruning old build cache (keeping current image cache)..."
+    # Only prune build cache, NOT images — this preserves the pip install layer
     docker builder prune -a -f 2>/dev/null || true
     AVAILABLE_KB=$(df / | tail -1 | awk '{print $4}')
-    if [ "$AVAILABLE_KB" -lt 1000000 ]; then
-        echo "[SERVER] ERROR: Still less than 1GB available. Cannot build safely."
-        echo "[SERVER] Free up disk space manually and try again."
+
+    if [ "$AVAILABLE_KB" -lt 3000000 ]; then
+        echo "[SERVER] Still low on space. Removing unused images..."
+        # Remove images not used by running containers, but keep the build cache
+        docker image prune -a -f 2>/dev/null || true
+        AVAILABLE_KB=$(df / | tail -1 | awk '{print $4}')
+    fi
+
+    if [ "$AVAILABLE_KB" -lt 2000000 ]; then
+        echo "[SERVER] ERROR: Less than 2GB available after cleanup. Cannot build safely."
+        echo "[SERVER] Run './deploy.sh --cleanup' from local to free more space."
         df -h /
         exit 1
     fi
@@ -247,6 +317,7 @@ info "Available commands:"
 info "  ./deploy.sh              Smart deploy (auto-detects changes)"
 info "  ./deploy.sh --restart    Restart only (after .env change on server)"
 info "  ./deploy.sh --fresh      Full rebuild (nuclear option)"
+info "  ./deploy.sh --fresh-db   Rebuild + wipe database & logs (clean slate)"
 info "  ./deploy.sh --logs       View recent logs"
 info "  ./deploy.sh --status     Container + disk status"
 info "  ./deploy.sh --cleanup    Free disk space"

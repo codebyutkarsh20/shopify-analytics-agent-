@@ -231,19 +231,10 @@ class MessageHandler:
             # Step 2: Classify intent
             intent = self.pattern_learner.classify_intent(message_text)
             
-            # Smart Intent Refinement: Use LLM if intent is ambiguous ("general")
-            # or if query seems complex
-            if intent.coarse == "general" or self.pattern_learner.assess_query_complexity(message_text) == "complex":
-                logger.info("Refining intent with LLM", initial_intent=intent.coarse)
-                try:
-                    refined_intent = await self.pattern_learner.refine_intent_with_llm(
-                        message_text, self.claude_service
-                    )
-                    if refined_intent:
-                        intent = refined_intent
-                        logger.info("Intent refined", new_intent=intent.coarse, fine=intent.fine)
-                except Exception as e:
-                    logger.warning("Intent refinement failed, continuing with original", error=str(e))
+            # NOTE: LLM-based intent refinement removed — it added ~3s latency
+            # for a separate API call that only helped with logging/session routing.
+            # The main LLM call with tools handles the actual query understanding.
+            # Regex-based classify_intent() is sufficient for session/logging purposes.
 
             query_type = intent.coarse
             logger.debug(

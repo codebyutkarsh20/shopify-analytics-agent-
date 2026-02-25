@@ -32,6 +32,16 @@ class TemplateManager:
         self.vector_store = vector_store
         logger.info("TemplateManager initialized", vector_search=vector_store is not None)
 
+    # Tools that should be preferred for analytics queries.
+    # When a preferred tool succeeds, competing non-preferred templates
+    # for the same intent get their confidence capped.
+    _PREFERRED_ANALYTICS_TOOLS = {"shopifyql_analytics"}
+
+    # Non-preferred tools whose confidence should be capped when a
+    # preferred tool exists for the same intent.  Also, new templates
+    # for these tools are created with lower initial confidence.
+    _LEGACY_AGGREGATE_RESOURCES = {"orders_aggregate"}
+
     def record_successful_query(
         self,
         user_id: int,
@@ -46,6 +56,11 @@ class TemplateManager:
         Finds or creates a template for this intent+tool combination,
         increments success count, and adds the user message as an example.
 
+        Tool preference aware: when ``shopifyql_analytics`` succeeds,
+        competing templates using ``orders_aggregate`` are automatically
+        deprioritised.  Conversely, ``orders_aggregate`` successes are
+        recorded at lower confidence so they don't override ShopifyQL.
+
         Args:
             user_id: User who executed the query
             user_message: Original user message (for examples)
@@ -54,6 +69,12 @@ class TemplateManager:
             execution_time_ms: How long execution took in milliseconds
             intent_category: Intent category (e.g., "products_ranking")
         """
+        # Determine if this is a legacy aggregate call (should get lower confidence)
+        is_legacy_aggregate = (
+            tool_name != "shopifyql_analytics"
+            and tool_params.get("resource") in self._LEGACY_AGGREGATE_RESOURCES
+        )
+
         # Step 1: Find existing template
         existing = self.db_ops.find_template(
             intent_category=intent_category,
@@ -73,6 +94,10 @@ class TemplateManager:
                 execution_time_ms=execution_time_ms,
             )
 
+            # Cap confidence for legacy aggregate templates
+            if is_legacy_aggregate:
+                self._cap_template_confidence(existing.id, max_confidence=0.5)
+
             # Step 2b: Add example
             self.db_ops.add_template_example(
                 template_id=existing.id,
@@ -81,11 +106,16 @@ class TemplateManager:
         else:
             # Step 3: Create new template
             description = self._generate_description(user_message, tool_name)
+
+            # Legacy aggregate tools get lower initial confidence
+            initial_confidence = 0.4 if is_legacy_aggregate else 0.8
+
             logger.info(
                 "Creating new template",
                 intent_category=intent_category,
                 tool_name=tool_name,
                 description=description,
+                initial_confidence=initial_confidence,
             )
             self.db_ops.create_template(
                 intent_category=intent_category,
@@ -94,11 +124,16 @@ class TemplateManager:
                 tool_parameters=json.dumps(tool_params),
                 created_by_user_id=user_id,
                 example_queries=json.dumps([user_message[:200]]),
-                confidence=0.8,
+                confidence=initial_confidence,
             )
 
         # Step 4: Store / update embedding for semantic search
         self._update_template_embedding(intent_category, tool_name)
+
+        # Step 5: If a preferred tool succeeded, deprecate competing
+        # legacy templates for the same intent
+        if tool_name in self._PREFERRED_ANALYTICS_TOOLS:
+            self._deprecate_competing_templates(intent_category, tool_name)
 
     def record_failed_query(
         self,
@@ -250,6 +285,79 @@ class TemplateManager:
             Description string
         """
         return f"Query using {tool_name}: {user_message[:100]}"
+
+    def _cap_template_confidence(self, template_id: int, max_confidence: float) -> None:
+        """Cap a template's confidence to a maximum value.
+
+        Used to prevent legacy tools from building up high confidence
+        that would override preferred tools in the context builder.
+        """
+        from sqlalchemy import select
+        from src.database.models import QueryTemplate
+
+        session = self.db_ops.get_session()
+        try:
+            stmt = select(QueryTemplate).where(QueryTemplate.id == template_id)
+            template = session.execute(stmt).scalar_one_or_none()
+            if template and template.confidence > max_confidence:
+                template.confidence = max_confidence
+                session.commit()
+                logger.debug(
+                    "Capped template confidence",
+                    template_id=template_id,
+                    max_confidence=max_confidence,
+                )
+        except Exception as e:
+            logger.warning("Failed to cap template confidence", error=str(e))
+            session.rollback()
+        finally:
+            session.close()
+
+    def _deprecate_competing_templates(
+        self,
+        intent_category: str,
+        preferred_tool: str,
+    ) -> None:
+        """Lower confidence of competing templates when a preferred tool succeeds.
+
+        When ``shopifyql_analytics`` succeeds for an intent, any templates
+        for the same intent using ``shopify_analytics`` or ``shopify_graphql``
+        with ``orders_aggregate`` parameters get their confidence capped at 0.3.
+        This prevents old learned patterns from overriding ShopifyQL.
+        """
+        from sqlalchemy import select, update, and_
+        from src.database.models import QueryTemplate
+
+        session = self.db_ops.get_session()
+        try:
+            # Find and deprecate templates for the same intent using old tools
+            stmt = (
+                update(QueryTemplate)
+                .where(
+                    and_(
+                        QueryTemplate.intent_category == intent_category,
+                        QueryTemplate.tool_name != preferred_tool,
+                        QueryTemplate.tool_name != "generate_chart",
+                        QueryTemplate.confidence > 0.3,
+                        QueryTemplate.tool_parameters.contains("orders_aggregate"),
+                    )
+                )
+                .values(confidence=0.2)
+            )
+            result = session.execute(stmt)
+            if result.rowcount > 0:
+                logger.info(
+                    "Deprecated competing templates after preferred tool success",
+                    intent_category=intent_category,
+                    preferred_tool=preferred_tool,
+                    deprecated_count=result.rowcount,
+                )
+            session.commit()
+        except Exception as e:
+            logger.warning("Failed to deprecate competing templates", error=str(e))
+            session.rollback()
+        finally:
+            session.close()
 
     def _update_template_embedding(
         self,

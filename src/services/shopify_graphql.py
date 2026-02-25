@@ -100,6 +100,9 @@ class ShopifyGraphQLClient:
     """Direct Shopify GraphQL Admin API client for analytics queries."""
 
     DEFAULT_API_VERSION = "2024-10"
+    # ShopifyQL requires 2025-04+; use a dedicated endpoint so we don't
+    # risk breaking existing product/order/customer queries.
+    SHOPIFYQL_API_VERSION = "unstable"
 
     def __init__(self, settings: Settings):
         # Normalize shop domain: strip protocol, trailing slashes
@@ -113,6 +116,10 @@ class ShopifyGraphQLClient:
         self.api_version = os.getenv("SHOPIFY_API_VERSION", self.DEFAULT_API_VERSION)
         self.endpoint = (
             f"https://{self.shop_domain}/admin/api/{self.api_version}/graphql.json"
+        )
+        # Separate endpoint for ShopifyQL (needs 2025-04+)
+        self.shopifyql_endpoint = (
+            f"https://{self.shop_domain}/admin/api/{self.SHOPIFYQL_API_VERSION}/graphql.json"
         )
         self.headers = {
             "X-Shopify-Access-Token": self.access_token,
@@ -677,6 +684,139 @@ class ShopifyGraphQLClient:
             "currency": currency,
             "pages_fetched": pages_fetched,
             "note": "Aggregated across ALL matching orders (auto-paginated).",
+        }
+
+    # ── ShopifyQL analytics (server-side aggregation) ────────────────
+
+    async def execute_shopifyql(self, query: str) -> Dict[str, Any]:
+        """
+        Execute a ShopifyQL analytics query via the Admin API.
+
+        ShopifyQL runs server-side on Shopify's analytics engine, computing
+        aggregates across ALL data (no pagination limits). Use this for any
+        analytics question: totals, trends, breakdowns, comparisons.
+
+        Requires: read_reports scope on the access token.
+        Uses dedicated 2025-04 endpoint (separate from main API version).
+
+        Args:
+            query: ShopifyQL query string, e.g.
+                   "FROM sales SHOW sum(total_sales) GROUP BY month SINCE -3m"
+
+        Returns:
+            Dict with columns (name, type, displayName) and rows of data,
+            or error details if the query failed.
+        """
+        logger.info("Executing ShopifyQL query", shopifyql=query[:200])
+
+        gql = """
+        query ShopifyQLAnalytics($query: String!) {
+            shopifyqlQuery(query: $query) {
+                tableData {
+                    rows
+                    columns {
+                        name
+                        dataType
+                        displayName
+                    }
+                }
+                parseErrors
+            }
+        }
+        """
+
+        variables = {"query": query}
+        # Use the ShopifyQL-specific endpoint (unstable) instead of the
+        # default endpoint, so we don't need to bump the global API version.
+        payload = {"query": gql, "variables": variables}
+        response = await self._client.post(
+            self.shopifyql_endpoint,
+            headers=self.headers,
+            json=payload,
+        )
+        response.raise_for_status()
+        resp_json = response.json()
+
+        # Check for GraphQL-level errors
+        if "errors" in resp_json:
+            error_msgs = [e.get("message", str(e)) for e in resp_json["errors"]]
+            logger.error("ShopifyQL GraphQL errors", errors=error_msgs)
+            raise Exception(f"ShopifyQL API error: {'; '.join(error_msgs)}")
+
+        data = resp_json.get("data", {})
+
+        result = data.get("shopifyqlQuery", {})
+
+        logger.debug(
+            "ShopifyQL raw response",
+            keys=list(result.keys()),
+            raw_preview=str(result)[:800],
+        )
+
+        # Check for parse errors (parseErrors is a scalar String in unstable)
+        parse_errors = result.get("parseErrors")
+        if parse_errors:
+            logger.warning("ShopifyQL parse errors", errors=parse_errors)
+            return {
+                "success": False,
+                "error": "ShopifyQL query has syntax errors",
+                "parse_errors": parse_errors if isinstance(parse_errors, list) else [str(parse_errors)],
+                "original_query": query,
+            }
+
+        # Extract table data. ShopifyqlQueryResponse has two fields:
+        # tableData (ShopifyqlTableData) and parseErrors.
+        # ShopifyqlTableData has: columns (list) and rows (JSON scalar).
+        table_data = result.get("tableData") or {}
+        columns = table_data.get("columns", [])
+        row_data = table_data.get("rows") or []
+
+        logger.debug(
+            "ShopifyQL parsed tableData",
+            table_data_keys=list(table_data.keys()) if isinstance(table_data, dict) else type(table_data).__name__,
+            row_data_type=type(row_data).__name__,
+            row_data_len=len(row_data) if isinstance(row_data, list) else "N/A",
+            raw_row_data_sample=str(row_data)[:500] if row_data else "empty",
+        )
+
+        logger.debug(
+            "ShopifyQL table data",
+            column_count=len(columns),
+            row_count=len(row_data),
+            sample_row=str(row_data[0])[:200] if row_data else "empty",
+        )
+
+        # Format into readable structure
+        column_names = [col.get("displayName") or col.get("name", f"col_{i}") for i, col in enumerate(columns)]
+        column_types = [col.get("dataType", "unknown") for col in columns]
+
+        # Convert rows (JSON scalar) into list of dicts.
+        # The API returns rows as a list of dicts, e.g.:
+        #   [{"total_sales": "14881990.06"}, ...]
+        rows = []
+        for row in row_data:
+            if isinstance(row, dict):
+                rows.append(row)
+            elif isinstance(row, list):
+                # Fallback: positional mapping if format ever changes
+                row_dict = {}
+                for i, val in enumerate(row):
+                    if i < len(column_names):
+                        row_dict[column_names[i]] = val
+                rows.append(row_dict)
+
+        logger.info(
+            "ShopifyQL query complete",
+            columns=len(columns),
+            rows=len(rows),
+        )
+
+        return {
+            "success": True,
+            "columns": [{"name": n, "type": t} for n, t in zip(column_names, column_types)],
+            "rows": rows,
+            "total_rows": len(rows),
+            "query": query,
         }
 
     # ── Response formatters ─────────────────────────────────────────

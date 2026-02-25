@@ -24,6 +24,7 @@ from src.utils.logger import get_logger
 from src.utils.timezone import now_ist, IST
 from src.services.tools.shopify_analytics import ShopifyAnalyticsTool
 from src.services.tools.shopify_graphql import ShopifyGraphQLTool
+from src.services.tools.shopifyql_analytics import ShopifyQLAnalyticsTool
 from src.services.tools.chart_generator import ChartGeneratorTool
 
 logger = get_logger(__name__)
@@ -175,33 +176,6 @@ class LLMService(ABC):
         """
         ...
 
-    async def get_classification(self, query: str, system_prompt: str) -> Optional[Dict[str, Any]]:
-        """Get a lightweight classification from the LLM.
-        
-        Args:
-            query: User query to classify
-            system_prompt: Instructions for classification
-            
-        Returns:
-            Dict containing classification results or None if failed
-        """
-        try:
-            messages = [{"role": "user", "content": f"Query: {query}"}]
-            # We use an empty list for tools to force a defined output or just text
-            # Some providers might need specific handling, but _call_api handles the protocol.
-            response = self._call_api(system_prompt, messages, tools=[])
-            
-            text, _ = self._parse_response(response)
-            
-            # extract JSON from text
-            json_match = re.search(r"\{.*\}", text, re.DOTALL)
-            if json_match:
-                return json.loads(json_match.group(0))
-            return None
-        except Exception as e:
-            logger.warning("Classification failed", error=str(e))
-            return None
-
     # ─── Shared logic (provider-agnostic) ──────────────────────────
 
     async def process_message(
@@ -237,6 +211,7 @@ class LLMService(ABC):
             # Reset tool call and chart tracking
             self.last_tool_calls = []
             self.last_chart_files = []
+            self._current_user_id = user_id  # Track for tool usage logging
             session_key = f"{user_id}_{session_id or 'nosession'}"
 
             # Determine query type for context prioritization
@@ -490,7 +465,8 @@ class LLMService(ABC):
         """
         tools = []
         if self.graphql_client:
-            # We instantiate with no args for now as they are stateles schemas
+            # ShopifyQL first — it's the primary analytics tool
+            tools.append(ShopifyQLAnalyticsTool().to_dict())
             tools.append(ShopifyAnalyticsTool().to_dict())
             tools.append(ShopifyGraphQLTool().to_dict())
         if self.chart_generator:
@@ -516,7 +492,9 @@ class LLMService(ABC):
                     tool_input=tool_input,
                 )
 
-                if tool_name == "shopify_analytics":
+                if tool_name == "shopifyql_analytics":
+                    result_json = await self._execute_shopifyql_tool(tool_input)
+                elif tool_name == "shopify_analytics":
                     result_json = await self._execute_analytics_tool(tool_input)
                 elif tool_name == "shopify_graphql":
                     result_json = await self._execute_raw_graphql(tool_input)
@@ -533,7 +511,7 @@ class LLMService(ABC):
             # Log successful tool usage
             try:
                 self.db_ops.log_tool_usage(
-                    user_id=0,
+                    user_id=getattr(self, '_current_user_id', 0),
                     tool_name=tool_name,
                     parameters=json.dumps(tool_input, default=str)[:2000],
                     success=True,
@@ -558,7 +536,7 @@ class LLMService(ABC):
             # Log tool usage
             try:
                 self.db_ops.log_tool_usage(
-                    user_id=0,
+                    user_id=getattr(self, '_current_user_id', 0),
                     tool_name=tool_name,
                     parameters=json.dumps(tool_input),
                     success=False,
@@ -572,7 +550,7 @@ class LLMService(ABC):
                 error_type = self._classify_error(str(e), tool_name)
                 lesson = self._generate_error_lesson(tool_name, tool_input, str(e), error_type)
                 self.db_ops.log_query_error(
-                    user_id=0,
+                    user_id=getattr(self, '_current_user_id', 0),
                     tool_name=tool_name,
                     query_text=json.dumps(tool_input, default=str)[:2000],
                     error_message=str(e)[:1000],
@@ -627,6 +605,17 @@ class LLMService(ABC):
 
         normalized = bare_date_re.sub(_convert_match, query_str)
         return normalized
+
+    async def _execute_shopifyql_tool(self, tool_input: Dict[str, Any]) -> str:
+        """Execute a ShopifyQL analytics query via Shopify's server-side engine."""
+        query = tool_input.get("query", "").strip()
+        if not query:
+            return json.dumps({"error": "ShopifyQL query is empty"})
+
+        logger.info("Executing ShopifyQL analytics", query=query[:200])
+
+        result = await self.graphql_client.execute_shopifyql(query)
+        return json.dumps(result, default=str, ensure_ascii=False)
 
     async def _execute_analytics_tool(self, tool_input: Dict[str, Any]) -> str:
         """Execute the shopify_analytics tool."""
@@ -789,7 +778,7 @@ class LLMService(ABC):
                 "   - 'Last 7 Days' includes data since: {week_ago_utc} (UTC)\n"
                 "   - 'Last 30 Days' includes data since: {month_ago_utc} (UTC)\n"
                 "3. Check for specific filters: Status, Tags, Fulfillment, etc.\n"
-                "4. Choose the best tool: Use 'shopify_analytics' for standard queries, 'shopify_graphql' ONLY for complex nested data.\n"
+                "4. Choose the best tool: Use 'shopifyql_analytics' for any analytics/aggregate question, 'shopify_analytics' for browsing individual records, 'shopify_graphql' for shop info or advanced queries.\n"
                 "5. Formulate the query parameters carefully.\n"
             ).format(
                 now_ist=now_ist_aware.strftime("%Y-%m-%d %H:%M:%S %Z"),
@@ -893,42 +882,68 @@ class LLMService(ABC):
                     "",
                     "AVAILABLE TOOLS:",
                     "",
-                    "1. shopify_analytics — Structured analytics queries with sorting, filtering, and pagination",
-                    "   - Query products, orders, customers, or orders_aggregate",
+                    "1. shopifyql_analytics — SERVER-SIDE ANALYTICS (PRIMARY TOOL FOR ALL ANALYTICS)",
+                    "   ★ USE THIS FIRST for any analytics, reporting, or aggregate question.",
+                    "   Shopify computes results server-side across ALL data — no pagination limits, instant results.",
+                    "   One API call replaces hundreds of paginated GraphQL calls.",
+                    "",
+                    "   DATASETS (FROM clause):",
+                    "     - sales: Revenue, discounts, returns, tax, shipping, product breakdowns, billing/shipping location",
+                    "     - orders: Order-level data (order_id, status, fulfillment, payment)",
+                    "     - products: Product performance (combines sales + sessions data)",
+                    "     - customers: Customer-level analytics",
+                    "     - sessions: Traffic/session data",
+                    "",
+                    "   KEY METRICS (sales dataset): total_sales, net_sales, gross_sales, returns, discounts, taxes, shipping, ordered_quantity, net_quantity",
+                    "   KEY DIMENSIONS (sales dataset): product_title, product_type, product_vendor, variant_title, sku, billing_country, billing_city, billing_region, shipping_country, discount_code",
+                    "",
+                    "   TIME FILTERING: SINCE/UNTIL with named ranges (today, yesterday, this_week, last_week, this_month, last_month, this_quarter, last_quarter, this_year, last_year) or relative (-7d, -30d, -3m, -1y)",
+                    "   TIMESERIES: GROUP BY day, week, month, quarter, year (for trends)",
+                    "   COMPARISONS: COMPARE TO previous_period or previous_year",
+                    "",
+                    "   EXAMPLE QUERIES (DO NOT use sum()/count() — just use metric names directly):",
+                    "     Total revenue this month:       FROM sales SHOW total_sales, net_sales, orders SINCE this_month",
+                    "     Monthly growth trend:           FROM sales SHOW net_sales GROUP BY month SINCE -6m",
+                    "     Top products by revenue:        FROM sales SHOW net_sales GROUP BY product_title ORDER BY net_sales DESC LIMIT 10",
+                    "     Where money is leaking:         FROM sales SHOW returns, discounts GROUP BY product_title ORDER BY returns DESC LIMIT 10",
+                    "     Revenue by country:             FROM sales SHOW net_sales GROUP BY billing_country ORDER BY net_sales DESC",
+                    "     Week-over-week comparison:      FROM sales SHOW total_sales SINCE -7d UNTIL today COMPARE TO previous_period",
+                    "     Product conversion funnel:      FROM products SHOW net_sales, view_sessions, view_cart_sessions GROUP BY product_title SINCE -7d ORDER BY net_sales DESC LIMIT 20",
+                    "     Daily order volume:             FROM sales SHOW orders GROUP BY day SINCE -30d",
+                    "     Discount code effectiveness:    FROM sales SHOW net_sales, discounts, orders GROUP BY discount_code ORDER BY net_sales DESC LIMIT 10",
+                    "",
+                    "   NOTE: ShopifyQL uses its own time handling (SINCE/UNTIL) — you do NOT need UTC conversion for ShopifyQL queries.",
+                    "   NOTE: If shopifyql_analytics returns an error about access/scope, fall back to shopify_analytics with orders_aggregate.",
+                    "",
+                    "2. shopify_analytics — Structured record-level queries (SECONDARY — for browsing individual records)",
+                    "   - Use ONLY when you need individual record details: specific orders, product listings, customer lists",
+                    "   - Query products, orders, customers with sorting, filtering, pagination",
                     "   - Sort products by: TITLE, PRICE, CREATED_AT, UPDATED_AT, INVENTORY_TOTAL, PRODUCT_TYPE, VENDOR",
                     "   - Sort orders by: CREATED_AT, TOTAL_PRICE, ORDER_NUMBER, PROCESSED_AT",
                     "   - Sort customers by: NAME, CREATED_AT, UPDATED_AT, RELEVANCE",
-                    "     NOTE: Shopify API does NOT support sorting customers by total_spent or orders_count.",
-                    "     To get top customers by spending, fetch all customers and sort client-side via shopify_graphql.",
-                    "   - Filter with Shopify queries: 'status:active', 'financial_status:paid'",
-                    "   - Date filters MUST use the pre-computed UTC boundaries above (e.g., created_at:>=YYYY-MM-DDTHH:MM:SSZ)",
-                    "   - Supports cursor-based pagination for large datasets",
+                    "   - Date filters MUST use the pre-computed UTC boundaries above",
+                    "   - Returns max 250 records per call — NOT suitable for totals or aggregates",
+                    "   - resource='orders_aggregate' is available as fallback if ShopifyQL is unavailable",
                     "",
-                    "   CRITICAL — Use resource='orders_aggregate' for total revenue, order counts, refund totals,",
-                    "   and any aggregate calculations. This auto-paginates through ALL orders (up to 10,000) to give",
-                    "   accurate totals. The regular 'orders' resource caps at 250 results and WILL give wrong totals.",
-                    "   Example: {\"resource\": \"orders_aggregate\", \"query\": \"created_at:>=2026-02-01T18:30:00Z\"}",
-                    "",
-                    "2. shopify_graphql — Custom GraphQL queries against Shopify Admin API",
-                    "   - Use for ANYTHING not covered by shopify_analytics",
-                    "   - Shop info, inventory levels, collections, discounts, metafields, fulfillments, etc.",
+                    "3. shopify_graphql — Custom raw GraphQL queries (FALLBACK — for advanced/specific data)",
+                    "   - Use for: shop info, inventory levels, collections, discounts, metafields, fulfillments, draft orders",
                     "   - You write the full GraphQL query using Shopify Admin API schema",
-                    "   - Uses Relay-style connections: edges { node { ... } } with pageInfo { hasNextPage endCursor }",
-                    "   - Key types: Product, Order, Customer, Collection, InventoryItem, DiscountCode, DraftOrder, Fulfillment",
-                    "   - Money fields use MoneyV2: { amount currencyCode }",
+                    "   - Relay-style connections: edges { node { ... } } with pageInfo",
                     "   - Shop info: { shop { name email myshopifyDomain plan { displayName } currencyCode } }",
                     "   - READ-ONLY: mutations are blocked for safety",
                     "",
-                    "TOOL SELECTION STRATEGY:",
-                    "- Use shopify_analytics (resource='orders_aggregate') for: total revenue, total order count, total refunds, net revenue — any aggregate calculation",
-                    "- Use shopify_analytics (resource='orders/products/customers') for: rankings, sorting, comparisons, listing specific records",
-                    "- Use shopify_graphql for: shop info, inventory, collections, discounts, metafields, complex nested queries, top customers by spending (fetch all + sort client-side), anything else",
+                    "TOOL SELECTION STRATEGY (follow this order):",
+                    "  1. shopifyql_analytics → ANY question about totals, trends, growth, comparisons, breakdowns, rankings by revenue/sales, profitability, leakage, performance",
+                    "  2. shopify_analytics → Browsing specific records: 'show me the last 10 orders', 'list active products', 'find customer X'",
+                    "  3. shopify_graphql → Shop info, inventory, collections, discounts, metafields, or anything the other tools can't do",
+                    "",
+                    "  WHEN IN DOUBT: Use shopifyql_analytics. It handles 90% of merchant questions accurately.",
                 ])
 
             if self.chart_generator:
                 system_parts.extend([
                     "",
-                    "3. generate_chart — Create chart images that appear INLINE in your response",
+                    "4. generate_chart — Create chart images that appear INLINE in your response",
                     "   - Query data first, then call generate_chart with extracted labels and values",
                     "   - Chart types: 'bar' (comparisons), 'line' (trends), 'pie' (distribution), 'horizontal_bar' (ranked lists)",
                     "",
@@ -989,10 +1004,13 @@ class LLMService(ABC):
                 "",
                 "DATA INTEGRITY — MANDATORY RULES (MOST IMPORTANT SECTION):",
                 "",
-                "1. ALWAYS USE TOOLS FOR DATA QUESTIONS — never answer from memory or conversation history.",
+                "1. ALWAYS USE TOOLS FOR DATA QUESTIONS — never reuse numbers from conversation history.",
                 "   Every time the user asks about orders, revenue, products, customers, or any store data,",
-                "   you MUST call shopify_analytics or shopify_graphql to get fresh data. NEVER say",
-                "   'based on our earlier conversation' or reuse numbers from previous messages.",
+                "   you MUST call a tool to get fresh data. NEVER reuse specific numbers from previous messages.",
+                "   HOWEVER: You MUST use conversation history to understand WHAT the user is asking about.",
+                "   If the user says 'this', 'that', 'same thing', 'analyse it further', or 'do it for 10000 orders',",
+                "   look at the previous messages to understand what metric/analysis they are referring to,",
+                "   then re-query that metric/analysis with the new parameters using a tool call.",
                 "",
                 "2. NEVER FABRICATE OR GUESS DATA — if a tool call returns no results, say exactly that.",
                 "   Do not invent order numbers, amounts, dates, or product names. Only report what the",
@@ -1193,18 +1211,21 @@ class LLMService(ABC):
             else:
                 messages.append({"role": "user", "content": message})
 
-            # Inject a data-freshness reminder if conversation history is present
-            # This prevents the LLM from reusing stale/wrong data from earlier turns
+            # Inject a data-freshness reminder if conversation history is present.
+            # This prevents the LLM from reusing stale numbers, while still
+            # allowing it to understand WHAT the user is referring to from context.
             if len(messages) > 1:
                 messages.insert(
                     -1,  # Right before the current user message
                     {
                         "role": "user",
                         "content": (
-                            "[SYSTEM REMINDER: Any numbers, order counts, or revenue figures "
-                            "in the conversation above may be outdated or incorrect. "
-                            "You MUST call a tool to get fresh data for every data question. "
-                            "Never reuse data from previous messages.]"
+                            "[SYSTEM REMINDER: Do NOT reuse specific numbers or data from previous messages — "
+                            "always call a tool to get fresh data. "
+                            "BUT DO use conversation history to understand CONTEXT: if the user says "
+                            "'this', 'that', 'same analysis', 'do it for more orders', etc., "
+                            "look at previous messages to understand what metric or analysis they mean, "
+                            "then re-run that analysis with the new parameters using a tool call.]"
                         ),
                     },
                 )
@@ -1212,7 +1233,10 @@ class LLMService(ABC):
                     -1,  # Matching assistant turn
                     {
                         "role": "assistant",
-                        "content": "Understood. I will always query fresh data from Shopify for every question.",
+                        "content": (
+                            "Understood. I will always query fresh data from Shopify, but I will use "
+                            "conversation history to understand what the user is referring to."
+                        ),
                     },
                 )
 
