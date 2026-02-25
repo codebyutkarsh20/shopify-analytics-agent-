@@ -40,8 +40,7 @@ ORDER_SORT_KEYS = [
     "PROCESSED_AT", "ID",
 ]
 CUSTOMER_SORT_KEYS = [
-    "NAME", "ORDERS_COUNT", "TOTAL_SPENT", "UPDATED_AT",
-    "CREATED_AT", "LAST_ORDER_DATE", "LOCATION", "ID",
+    "NAME", "UPDATED_AT", "CREATED_AT", "RELEVANCE", "ID",
 ]
 
 
@@ -301,7 +300,7 @@ class ShopifyGraphQLClient:
                             minVariantPrice { amount currencyCode }
                             maxVariantPrice { amount currencyCode }
                         }
-                        variants(first: 10) {
+                        variants(first: 50) {
                             edges {
                                 node {
                                     id title price inventoryQuantity sku
@@ -358,7 +357,7 @@ class ShopifyGraphQLClient:
                                 minVariantPrice { amount currencyCode }
                                 maxVariantPrice { amount currencyCode }
                             }
-                            variants(first: 10) {
+                            variants(first: 50) {
                                 edges {
                                     node { id title price inventoryQuantity sku }
                                 }
@@ -460,9 +459,18 @@ class ShopifyGraphQLClient:
                         createdAt
                         totalPriceSet { shopMoney { amount currencyCode } }
                         subtotalPriceSet { shopMoney { amount currencyCode } }
+                        totalDiscountsSet { shopMoney { amount currencyCode } }
+                        totalTaxSet { shopMoney { amount currencyCode } }
+                        currentTotalPriceSet { shopMoney { amount currencyCode } }
                         displayFinancialStatus
                         displayFulfillmentStatus
-                        lineItems(first: 10) {
+                        customer {
+                            id
+                            firstName
+                            lastName
+                            email
+                        }
+                        lineItems(first: 50) {
                             edges {
                                 node {
                                     title
@@ -470,6 +478,11 @@ class ShopifyGraphQLClient:
                                     originalTotalSet { shopMoney { amount currencyCode } }
                                 }
                             }
+                        }
+                        refunds {
+                            id
+                            createdAt
+                            totalRefundedSet { shopMoney { amount currencyCode } }
                         }
                     }
                     cursor
@@ -562,6 +575,110 @@ class ShopifyGraphQLClient:
         result["sort_order"] = "descending" if reverse else "ascending"
         return result
 
+    # ── Aggregate queries (auto-paginate for totals) ───────────────
+
+    async def aggregate_orders(
+        self,
+        query: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Paginate through ALL matching orders to compute accurate totals.
+
+        Use this for questions like 'total revenue', 'how many orders',
+        'total refunds', etc. where the 250-item cap would give wrong results.
+
+        Args:
+            query: Shopify filter string (e.g., "created_at:>=2026-02-01T18:30:00Z")
+
+        Returns:
+            Dict with total_orders, total_revenue, total_refunded, total_tax,
+            total_discounts, net_revenue, and currency.
+        """
+        logger.info("Aggregating all orders", query=query)
+
+        total_orders = 0
+        total_revenue = 0.0
+        total_refunded = 0.0
+        total_tax = 0.0
+        total_discounts = 0.0
+        currency = "INR"
+        cursor = None
+        pages_fetched = 0
+
+        while True:
+            gql = """
+            query AggregateOrders($first: Int!, $query: String, $after: String) {
+                orders(first: $first, query: $query, after: $after) {
+                    edges {
+                        node {
+                            totalPriceSet { shopMoney { amount currencyCode } }
+                            totalTaxSet { shopMoney { amount currencyCode } }
+                            totalDiscountsSet { shopMoney { amount currencyCode } }
+                            refunds {
+                                totalRefundedSet { shopMoney { amount } }
+                            }
+                        }
+                        cursor
+                    }
+                    pageInfo { hasNextPage endCursor }
+                }
+            }
+            """
+
+            variables = {"first": 250, "query": query, "after": cursor}
+            data = await self.execute_query(gql, variables)
+            pages_fetched += 1
+
+            orders_data = data.get("orders", {})
+            edges = orders_data.get("edges", [])
+
+            for edge in edges:
+                node = edge["node"]
+                total_orders += 1
+
+                price = node.get("totalPriceSet", {}).get("shopMoney", {})
+                total_revenue += float(price.get("amount", 0) or 0)
+                currency = price.get("currencyCode", currency)
+
+                tax = node.get("totalTaxSet", {}).get("shopMoney", {})
+                total_tax += float(tax.get("amount", 0) or 0)
+
+                disc = node.get("totalDiscountsSet", {}).get("shopMoney", {})
+                total_discounts += float(disc.get("amount", 0) or 0)
+
+                for refund in node.get("refunds", []):
+                    ref_amt = refund.get("totalRefundedSet", {}).get("shopMoney", {})
+                    total_refunded += float(ref_amt.get("amount", 0) or 0)
+
+            page_info = orders_data.get("pageInfo", {})
+            if not page_info.get("hasNextPage"):
+                break
+            cursor = page_info.get("endCursor")
+
+            # Safety limit: 40 pages = 10,000 orders
+            if pages_fetched >= 40:
+                logger.warning("Hit pagination safety limit for order aggregation")
+                break
+
+        logger.info(
+            "Order aggregation complete",
+            total_orders=total_orders,
+            total_revenue=round(total_revenue, 2),
+            pages_fetched=pages_fetched,
+        )
+
+        return {
+            "total_orders": total_orders,
+            "total_revenue": round(total_revenue, 2),
+            "total_refunded": round(total_refunded, 2),
+            "total_tax": round(total_tax, 2),
+            "total_discounts": round(total_discounts, 2),
+            "net_revenue": round(total_revenue - total_refunded, 2),
+            "currency": currency,
+            "pages_fetched": pages_fetched,
+            "note": "Aggregated across ALL matching orders (auto-paginated).",
+        }
+
     # ── Response formatters ─────────────────────────────────────────
 
     def _format_product_node(self, node: Dict) -> Dict[str, Any]:
@@ -623,6 +740,10 @@ class ShopifyGraphQLClient:
             if not node:
                 continue
             total_price = node.get("totalPriceSet", {}).get("shopMoney", {})
+            subtotal_price = node.get("subtotalPriceSet", {}).get("shopMoney", {})
+            total_discounts = node.get("totalDiscountsSet", {}).get("shopMoney", {})
+            total_tax = node.get("totalTaxSet", {}).get("shopMoney", {})
+            current_total = node.get("currentTotalPriceSet", {}).get("shopMoney", {})
             customer = node.get("customer") or {}
 
             line_items = []
@@ -636,11 +757,25 @@ class ShopifyGraphQLClient:
                     "currency": li_total.get("currencyCode"),
                 })
 
+            refunds = []
+            for refund in node.get("refunds", []):
+                refund_total = refund.get("totalRefundedSet", {}).get("shopMoney", {})
+                refunds.append({
+                    "id": refund.get("id"),
+                    "created_at": refund.get("createdAt"),
+                    "amount": refund_total.get("amount"),
+                    "currency": refund_total.get("currencyCode"),
+                })
+
             orders.append({
                 "id": node.get("id"),
                 "name": node.get("name"),
                 "created_at": node.get("createdAt"),
                 "total_price": total_price.get("amount"),
+                "subtotal_price": subtotal_price.get("amount"),
+                "total_discounts": total_discounts.get("amount"),
+                "total_tax": total_tax.get("amount"),
+                "current_total_price": current_total.get("amount"),
                 "currency": total_price.get("currencyCode"),
                 "financial_status": node.get("displayFinancialStatus"),
                 "fulfillment_status": node.get("displayFulfillmentStatus"),
@@ -648,7 +783,10 @@ class ShopifyGraphQLClient:
                     f"{customer.get('firstName', '')} {customer.get('lastName', '')}".strip()
                 ),
                 "customer_email": customer.get("email"),
+                "customer_id": customer.get("id"),
                 "line_items": line_items,
+                "refunds": refunds,
+                "total_refunded": sum(float(r.get("amount", 0) or 0) for r in refunds),
             })
 
         return {

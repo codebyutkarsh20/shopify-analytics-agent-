@@ -27,16 +27,23 @@ class ShopifyAnalyticsTool(BaseTool):
             "properties": {
                 "resource": {
                     "type": "string",
-                    "enum": ["products", "orders", "customers"],
-                    "description": "The type of Shopify resource to query",
+                    "enum": ["products", "orders", "customers", "orders_aggregate"],
+                    "description": (
+                        "The type of Shopify resource to query. "
+                        "Use 'orders_aggregate' for total revenue, total order count, total refunds, "
+                        "and other aggregate calculations — it auto-paginates through ALL matching orders "
+                        "to give accurate totals (unlike 'orders' which caps at 250)."
+                    ),
                 },
                 "sort_key": {
                     "type": "string",
                     "description": (
-                        "Field to sort by. "
-                        "Products: TITLE, PRICE, BEST_SELLING, CREATED_AT, UPDATED_AT, INVENTORY_TOTAL. "
+                        "Field to sort by (NOT used for orders_aggregate). "
+                        "Products: TITLE, PRICE, CREATED_AT, UPDATED_AT, INVENTORY_TOTAL, PRODUCT_TYPE, VENDOR. "
                         "Orders: CREATED_AT, TOTAL_PRICE, ORDER_NUMBER, PROCESSED_AT. "
-                        "Customers: NAME, TOTAL_SPENT, ORDERS_COUNT, CREATED_AT, LAST_ORDER_DATE."
+                        "Customers: NAME, CREATED_AT, UPDATED_AT, RELEVANCE (NOTE: sorting by total_spent "
+                        "or orders_count is NOT supported by Shopify API — use orders_aggregate or "
+                        "shopify_graphql to fetch all customers and sort client-side)."
                     ),
                 },
                 "reverse": {
@@ -71,7 +78,7 @@ class ShopifyAnalyticsTool(BaseTool):
         
         # Validate resource enum
         resource = input_data.get("resource")
-        if resource not in ["products", "orders", "customers"]:
+        if resource not in ["products", "orders", "customers", "orders_aggregate"]:
             raise ValueError(f"Invalid resource: {resource}")
             
         # Validate limit

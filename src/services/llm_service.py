@@ -572,10 +572,10 @@ class LLMService(ABC):
         import pytz
         from datetime import datetime as _dt
 
-        # Pattern: created_at or updated_at with a bare date (no time component)
-        # Matches: created_at:>2026-02-09, created_at:>=2026-02-09, created_at:<2026-02-09
+        # Pattern: date fields with a bare date (no time component)
+        # Matches: created_at:>2026-02-09, updated_at:>=2026-02-09, processed_at:<2026-02-09
         bare_date_re = re.compile(
-            r'((?:created_at|updated_at)\s*:\s*(?:>=?|<=?))\s*(\d{4}-\d{2}-\d{2})(?!T)'
+            r'((?:created_at|updated_at|processed_at|closed_at|cancelled_at)\s*:\s*(?:>=?|<=?))\s*(\d{4}-\d{2}-\d{2})(?!T)'
         )
 
         def _convert_match(m):
@@ -629,6 +629,10 @@ class LLMService(ABC):
             result = await self.graphql_client.query_customers(
                 sort_key=sort_key, reverse=reverse, limit=limit,
                 query=query, after=after,
+            )
+        elif resource == "orders_aggregate":
+            result = await self.graphql_client.aggregate_orders(
+                query=query,
             )
         else:
             raise ValueError(f"Unknown resource: {resource}")
@@ -862,13 +866,20 @@ class LLMService(ABC):
                     "AVAILABLE TOOLS:",
                     "",
                     "1. shopify_analytics — Structured analytics queries with sorting, filtering, and pagination",
-                    "   - Query products, orders, or customers",
-                    "   - Sort products by: TITLE, PRICE, BEST_SELLING, CREATED_AT, INVENTORY_TOTAL",
-                    "   - Sort orders by: CREATED_AT, TOTAL_PRICE, ORDER_NUMBER",
-                    "   - Sort customers by: NAME, TOTAL_SPENT, ORDERS_COUNT, LAST_ORDER_DATE",
+                    "   - Query products, orders, customers, or orders_aggregate",
+                    "   - Sort products by: TITLE, PRICE, CREATED_AT, UPDATED_AT, INVENTORY_TOTAL, PRODUCT_TYPE, VENDOR",
+                    "   - Sort orders by: CREATED_AT, TOTAL_PRICE, ORDER_NUMBER, PROCESSED_AT",
+                    "   - Sort customers by: NAME, CREATED_AT, UPDATED_AT, RELEVANCE",
+                    "     NOTE: Shopify API does NOT support sorting customers by total_spent or orders_count.",
+                    "     To get top customers by spending, fetch all customers and sort client-side via shopify_graphql.",
                     "   - Filter with Shopify queries: 'status:active', 'financial_status:paid'",
                     "   - Date filters MUST use the pre-computed UTC boundaries above (e.g., created_at:>=YYYY-MM-DDTHH:MM:SSZ)",
                     "   - Supports cursor-based pagination for large datasets",
+                    "",
+                    "   CRITICAL — Use resource='orders_aggregate' for total revenue, order counts, refund totals,",
+                    "   and any aggregate calculations. This auto-paginates through ALL orders (up to 10,000) to give",
+                    "   accurate totals. The regular 'orders' resource caps at 250 results and WILL give wrong totals.",
+                    "   Example: {\"resource\": \"orders_aggregate\", \"query\": \"created_at:>=2026-02-01T18:30:00Z\"}",
                     "",
                     "2. shopify_graphql — Custom GraphQL queries against Shopify Admin API",
                     "   - Use for ANYTHING not covered by shopify_analytics",
@@ -881,8 +892,9 @@ class LLMService(ABC):
                     "   - READ-ONLY: mutations are blocked for safety",
                     "",
                     "TOOL SELECTION STRATEGY:",
-                    "- Use shopify_analytics for: rankings, sorting, comparisons, date-filtered queries on products/orders/customers",
-                    "- Use shopify_graphql for: shop info, inventory, collections, discounts, metafields, complex nested queries, anything else",
+                    "- Use shopify_analytics (resource='orders_aggregate') for: total revenue, total order count, total refunds, net revenue — any aggregate calculation",
+                    "- Use shopify_analytics (resource='orders/products/customers') for: rankings, sorting, comparisons, listing specific records",
+                    "- Use shopify_graphql for: shop info, inventory, collections, discounts, metafields, complex nested queries, top customers by spending (fetch all + sort client-side), anything else",
                 ])
 
             if self.chart_generator:

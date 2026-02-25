@@ -19,7 +19,7 @@ SEED_TEMPLATES = [
         "tool_name": "shopify_analytics",
         "tool_parameters": json.dumps({
             "resource": "products",
-            "sort_key": "BEST_SELLING",
+            "sort_key": "CREATED_AT",
             "reverse": True,
             "limit": 10,
         }),
@@ -68,13 +68,10 @@ SEED_TEMPLATES = [
     },
     {
         "intent_category": "customers_top_spenders",
-        "intent_description": "Top customers by total spending",
-        "tool_name": "shopify_analytics",
+        "intent_description": "Top customers by total spending — fetches all and sorts client-side",
+        "tool_name": "shopify_graphql",
         "tool_parameters": json.dumps({
-            "resource": "customers",
-            "sort_key": "TOTAL_SPENT",
-            "reverse": True,
-            "limit": 10,
+            "query": "{ customers(first: 250, sortKey: CREATED_AT, reverse: true) { edges { node { id firstName lastName email numberOfOrders amountSpent { amount currencyCode } } } } }",
         }),
         "confidence": 0.8,
         "example_queries": json.dumps([
@@ -155,13 +152,10 @@ SEED_TEMPLATES = [
     },
     {
         "intent_category": "customers_by_orders",
-        "intent_description": "Customers with most orders (repeat buyers)",
-        "tool_name": "shopify_analytics",
+        "intent_description": "Customers with most orders (repeat buyers) — fetches all and sorts client-side",
+        "tool_name": "shopify_graphql",
         "tool_parameters": json.dumps({
-            "resource": "customers",
-            "sort_key": "ORDERS_COUNT",
-            "reverse": True,
-            "limit": 10,
+            "query": "{ customers(first: 250, sortKey: CREATED_AT, reverse: true) { edges { node { id firstName lastName email numberOfOrders amountSpent { amount currencyCode } } } } }",
         }),
         "confidence": 0.8,
         "example_queries": json.dumps([
@@ -169,6 +163,24 @@ SEED_TEMPLATES = [
             "most orders",
             "loyal customers",
             "frequent buyers",
+        ]),
+    },
+    {
+        "intent_category": "revenue_total",
+        "intent_description": "Total revenue and order count (auto-paginated for accuracy)",
+        "tool_name": "shopify_analytics",
+        "tool_parameters": json.dumps({
+            "resource": "orders_aggregate",
+        }),
+        "confidence": 0.85,
+        "example_queries": json.dumps([
+            "total revenue",
+            "how much revenue",
+            "total sales",
+            "how many orders",
+            "total order count",
+            "net revenue",
+            "total refunds",
         ]),
     },
     {
