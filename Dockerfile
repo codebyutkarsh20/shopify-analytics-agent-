@@ -58,9 +58,10 @@ USER botuser
 # Expose WhatsApp webhook port (only used if WHATSAPP_ENABLED=true)
 EXPOSE 8080
 
-# Health check: verify the Python process is alive
-HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
-    CMD python -c "import sys; sys.exit(0)" || exit 1
+# Health check: hit the actual WhatsApp webhook /health endpoint
+# start-period=60s gives sentence-transformers model time to load
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/health', timeout=5)" || exit 1
 
 # Default command
 CMD ["python", "main.py"]

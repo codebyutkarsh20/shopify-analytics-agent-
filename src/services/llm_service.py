@@ -267,7 +267,7 @@ class LLMService(ABC):
             # Multi-turn tool use loop
             response_text = ""
             tool_use_count = 0
-            max_tool_iterations = 10
+            max_tool_iterations = 15
 
             while tool_use_count < max_tool_iterations:
                 logger.debug(
@@ -397,6 +397,34 @@ class LLMService(ABC):
                     messages.extend(results_msg)
                 else:
                     messages.append(results_msg)
+
+            # ---- Safety net: if loop exhausted without a final text response ----
+            # The LLM used all tool iterations but never produced a text response.
+            # Make one final API call WITHOUT tools so it must respond with text.
+            if not response_text and tool_use_count >= max_tool_iterations:
+                logger.warning(
+                    "Tool iteration limit reached with no text response — forcing final summary",
+                    tool_use_count=tool_use_count,
+                )
+                try:
+                    # Add instruction to summarize with available data
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "[SYSTEM: You have reached the maximum number of tool calls. "
+                            "You MUST now respond with a text summary using all the data "
+                            "you have already collected. Do NOT request any more tool calls. "
+                            "Summarize your findings for the user.]"
+                        ),
+                    })
+                    # Call API with empty tools list to force text-only response
+                    final_response = self._call_api(system_prompt, messages, tools=[])
+                    final_text, _ = self._parse_response(final_response)
+                    if final_text:
+                        response_text = final_text
+                        logger.info("Forced final summary generated", response_length=len(response_text))
+                except Exception as final_err:
+                    logger.error("Failed to generate forced summary", error=str(final_err))
 
             logger.info(
                 "Message processed successfully",

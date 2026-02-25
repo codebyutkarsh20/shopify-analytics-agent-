@@ -1679,7 +1679,18 @@ class DatabaseOperations:
             if template:
                 examples = []
                 if template.example_queries:
-                    examples = json.loads(template.example_queries)
+                    try:
+                        parsed = json.loads(template.example_queries)
+                        if isinstance(parsed, list):
+                            examples = parsed
+                        elif isinstance(parsed, str):
+                            # Handle malformed data: single string instead of array
+                            examples = [parsed] if parsed else []
+                        else:
+                            examples = []
+                    except (json.JSONDecodeError, TypeError):
+                        # Corrupted JSON — start fresh
+                        examples = []
                 if example_query not in examples:
                     examples.append(example_query)
                 template.example_queries = json.dumps(examples)
