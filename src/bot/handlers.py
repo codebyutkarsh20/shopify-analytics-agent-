@@ -4,6 +4,7 @@ Processes natural language queries and handles bot interactions with users.
 Integrates session management, learning, feedback analysis, and channel adaptation.
 """
 
+import asyncio
 import hmac
 import os
 import re
@@ -299,20 +300,39 @@ class MessageHandler:
                 return
 
             # Step 6: Process message through Claude service (session-aware)
+            # Keep typing indicator alive throughout processing
             logger.debug("Processing message through Claude", user_id=user.id)
-            
-            # Note: We are passing the intent object (Intent class) to the service, 
-            # but the service expects a string or similar in `process_message`.
-            # Let's pass the fine-grained intent string as before, but ensure the service uses it.
-            # Ideally, we should pass the whole intent object if the service supports it, 
-            # OR pass the refined intent string.
-            
-            response = await self.claude_service.process_message(
-                user_id=user.id,
-                message=message_text,
-                intent=intent,  # Passing the full intent object allows explicit access to coarse/fine
-                session_id=session_id,
-            )
+
+            typing_active = True
+
+            async def _keep_typing():
+                """Send typing indicator every 4 seconds until processing completes."""
+                while typing_active:
+                    try:
+                        await context.bot.send_chat_action(
+                            chat_id=update.effective_chat.id,
+                            action=ChatAction.TYPING,
+                        )
+                    except Exception:
+                        pass  # Non-critical — don't break processing
+                    await asyncio.sleep(4)
+
+            typing_task = asyncio.create_task(_keep_typing())
+
+            try:
+                response = await self.claude_service.process_message(
+                    user_id=user.id,
+                    message=message_text,
+                    intent=intent,
+                    session_id=session_id,
+                )
+            finally:
+                typing_active = False
+                typing_task.cancel()
+                try:
+                    await typing_task
+                except asyncio.CancelledError:
+                    pass
             logger.debug(
                 "Claude response received",
                 user_id=user.id,
